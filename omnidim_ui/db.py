@@ -33,8 +33,8 @@ def compact_json(value: Any) -> str:
     return text
 
 
-def get_db(db_path=None) -> sqlite3.Connection:
-    target = db_path or DB_PATH
+def get_db(db_path: Path | str | None = None) -> sqlite3.Connection:
+    target = Path(db_path) if db_path else DB_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(target)
     conn.row_factory = sqlite3.Row
@@ -120,7 +120,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
             conn.commit()
 
 
-def init_db(db_path=None) -> None:
+def init_db(db_path: Path | str | None = None) -> None:
     with get_db(db_path) as conn:
         apply_migrations(conn)
         conn.execute(
@@ -131,7 +131,7 @@ def init_db(db_path=None) -> None:
         migrate_legacy_enc_v1(db_conn=conn)
 
 
-def save_setting(key: str, value: str, db_conn=None) -> None:
+def save_setting(key: str, value: str, db_conn: sqlite3.Connection | None = None) -> None:
     if db_conn is not None:
         db_conn.execute(
             """
@@ -151,7 +151,7 @@ def save_setting(key: str, value: str, db_conn=None) -> None:
             )
 
 
-def delete_setting(key: str, db_conn=None) -> None:
+def delete_setting(key: str, db_conn: sqlite3.Connection | None = None) -> None:
     if db_conn is not None:
         db_conn.execute("DELETE FROM settings WHERE key = ?", (key,))
     else:
@@ -159,7 +159,7 @@ def delete_setting(key: str, db_conn=None) -> None:
             conn.execute("DELETE FROM settings WHERE key = ?", (key,))
 
 
-def read_settings(include_secret: bool = False, db_conn=None) -> dict[str, Any]:
+def read_settings(include_secret: bool = False, db_conn: sqlite3.Connection | None = None) -> dict[str, Any]:
     if db_conn is not None:
         rows = db_conn.execute("SELECT key, value FROM settings").fetchall()
     else:
@@ -215,13 +215,13 @@ def log_history(
     duration_ms: int,
     request_payload: Any,
     response_payload: Any,
-    db_conn=None,
+    db_conn: sqlite3.Connection | None = None,
 ) -> None:
     clean_url = sanitize_url(url)
     redacted_req = redact_payload(request_payload)
     redacted_res = redact_payload(response_payload)
 
-    def _execute(conn: sqlite3.Connection):
+    def _execute(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT INTO request_history
@@ -274,14 +274,14 @@ def get_history(
     search: str | None = None,
     status: int | None = None,
     method: str | None = None,
-    db_conn=None,
+    db_conn: sqlite3.Connection | Path | str | None = None,
 ) -> dict[str, Any]:
     page = max(1, int(page))
     limit = max(1, min(100, int(limit)))
     offset = (page - 1) * limit
 
-    where_clauses = []
-    params = []
+    where_clauses: list[str] = []
+    params: list[Any] = []
 
     if search:
         search_term = f"%{search.strip().lower()}%"
@@ -298,9 +298,9 @@ def get_history(
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    def _query(conn: sqlite3.Connection):
+    def _query(conn: sqlite3.Connection) -> dict[str, Any]:
         count_row = conn.execute(f"SELECT COUNT(*) AS total FROM request_history {where_sql}", params).fetchone()
-        total = count_row["total"] if count_row else 0
+        total: int = count_row["total"] if count_row else 0
 
         query_sql = f"""
             SELECT id, endpoint_id, method, path, url, status, ok, duration_ms,
@@ -331,23 +331,24 @@ def get_history(
             )
 
         total_pages = math.ceil(total / limit) if total > 0 else 1
-        return {
+        res_dict: dict[str, Any] = {
             "items": items,
             "total": total,
             "page": page,
             "limit": limit,
             "totalPages": total_pages,
         }
+        return res_dict
 
-    if db_conn is not None and hasattr(db_conn, "execute"):
+    if db_conn is not None and isinstance(db_conn, sqlite3.Connection):
         return _query(db_conn)
     target = db_conn if isinstance(db_conn, (str, Path)) else None
     with get_db(target) as conn:
         return _query(conn)
 
 
-def clear_history(db_conn=None) -> None:
-    if db_conn is not None and hasattr(db_conn, "execute"):
+def clear_history(db_conn: sqlite3.Connection | Path | str | None = None) -> None:
+    if db_conn is not None and isinstance(db_conn, sqlite3.Connection):
         db_conn.execute("DELETE FROM request_history")
     else:
         target = db_conn if isinstance(db_conn, (str, Path)) else None

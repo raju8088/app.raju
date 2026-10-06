@@ -7,9 +7,11 @@ import os
 import platform
 import re
 import secrets
+import sqlite3
 import threading
 import time
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 from omnidim_ui.config import (
@@ -20,7 +22,7 @@ from omnidim_ui.config import (
 from omnidim_ui.logging_config import logger
 
 try:
-    import keyring
+    import keyring  # type: ignore[import-not-found]
 except ImportError:
     keyring = None
 
@@ -102,7 +104,10 @@ def dpapi_unprotect(encrypted_str: str, crypt32: Any = None, kernel32: Any = Non
         crypt32 = ctypes.windll.crypt32
         kernel32 = ctypes.windll.kernel32
 
-    raw = base64.b64decode(encrypted_str[6:])
+    try:
+        raw = base64.b64decode(encrypted_str[6:])
+    except Exception as exc:
+        raise ValueError(f"Invalid DPAPI base64 payload: {exc}") from exc
     in_blob = _DATA_BLOB(
         len(raw),
         ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)),
@@ -123,7 +128,7 @@ def dpapi_unprotect(encrypted_str: str, crypt32: Any = None, kernel32: Any = Non
 CSRF_TOKEN = secrets.token_hex(32)
 LOCAL_AUTH_TOKEN = secrets.token_urlsafe(32)
 
-CONFIRMATION_TOKENS = {}  # token -> (timestamp, endpoint_id, signature)
+CONFIRMATION_TOKENS: dict[str, tuple[float, str, str, str]] = {}  # token -> (timestamp, endpoint_id, signature, session_id)
 
 
 def is_valid_host(host_header: str) -> bool:
@@ -152,7 +157,7 @@ def is_valid_csrf(token_header: str) -> bool:
     return hmac.compare_digest(token_header.strip(), CSRF_TOKEN)
 
 
-def redact_payload(obj):
+def redact_payload(obj: Any) -> Any:
     if isinstance(obj, dict):
         redacted = {}
         for k, v in obj.items():
@@ -188,7 +193,7 @@ def sanitize_url(url_str: str) -> str:
         return url_str
 
 
-def compute_danger_signature(method: str, path: str, query: dict, body: object) -> str:
+def compute_danger_signature(method: str, path: str, query: dict[str, Any] | None, body: object) -> str:
     """Compute deterministic SHA-256 hash of method, path, query, and body."""
     canon_query = json.dumps(query or {}, sort_keys=True, separators=(",", ":"))
     canon_body = json.dumps(body if body is not None else {}, sort_keys=True, separators=(",", ":"))
@@ -265,7 +270,7 @@ def consume_confirm_token(
         return True, "ok"
 
 
-def secure_db_file(db_path=None):
+def secure_db_file(db_path: Path | None = None) -> None:
     target = db_path or DB_PATH
     if target.exists():
         try:
@@ -274,7 +279,7 @@ def secure_db_file(db_path=None):
             pass
 
 
-def get_api_key(db_conn=None):
+def get_api_key(db_conn: sqlite3.Connection | None = None) -> tuple[str, str]:
     # 1. Environment variable has highest priority (never stored on disk)
     env_key = os.environ.get("OMNIDIM_API_KEY", "").strip()
     if env_key:
@@ -316,7 +321,7 @@ def get_api_key(db_conn=None):
     return "", "none"
 
 
-def save_api_key(api_key: str, db_conn=None) -> str:
+def save_api_key(api_key: str, db_conn: sqlite3.Connection | None = None) -> str:
     if not api_key:
         return "none"
     from omnidim_ui.db import delete_setting, save_setting
@@ -340,7 +345,7 @@ def save_api_key(api_key: str, db_conn=None) -> str:
         )
 
 
-def delete_api_key(db_conn=None):
+def delete_api_key(db_conn: sqlite3.Connection | None = None) -> None:
     from omnidim_ui.db import delete_setting
 
     if keyring:
@@ -351,7 +356,7 @@ def delete_api_key(db_conn=None):
     delete_setting("api_key", db_conn=db_conn)
 
 
-def migrate_legacy_enc_v1(db_conn=None):
+def migrate_legacy_enc_v1(db_conn: sqlite3.Connection | None = None) -> None:
     from omnidim_ui.config import DATA_DIR
     from omnidim_ui.db import get_db, now_iso
 

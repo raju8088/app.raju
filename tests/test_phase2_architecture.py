@@ -214,6 +214,7 @@ def test_openapi_catalog_drift_100_percent():
 
 def test_history_retention_setting_and_clear_api(live_server):
     host_port, port = live_server
+    omnidim_ui.delete_setting("history_retention_limit")
     conn = http.client.HTTPConnection("127.0.0.1", port)
 
     # 1. Default retention limit is 5000

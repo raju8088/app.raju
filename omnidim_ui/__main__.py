@@ -8,7 +8,7 @@ from omnidim_ui.handlers import AppHandler
 from omnidim_ui.logging_config import logger, setup_logging
 
 
-def main():
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OmniDimension Control Center Local Server")
     parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8787, help="Port to bind (default: 8787)")
@@ -24,7 +24,7 @@ def main():
         action="store_true",
         help="Enable detailed debug logging",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     setup_logging(verbose=args.verbose)
 
@@ -49,7 +49,9 @@ def main():
     finally:
         server.server_close()
         logger.info("Server closed.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())

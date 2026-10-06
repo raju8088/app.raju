@@ -30,6 +30,9 @@ data/.secret_key*
 # Testing & Dev caches
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 uv.lock
 
 

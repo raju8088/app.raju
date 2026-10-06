@@ -1,6 +1,9 @@
-import re
+from __future__ import annotations
 
-_TEMPLATE_REGEX_CACHE = {}
+import re
+from typing import Any
+
+_TEMPLATE_REGEX_CACHE: dict[str, re.Pattern[str]] = {}
 
 
 def endpoint_id(method: str, path: str) -> str:
@@ -13,10 +16,10 @@ def ep(
     path: str,
     summary: str,
     body: object = None,
-    query: dict | None = None,
+    query: dict[str, Any] | None = None,
     note: str = "",
     danger: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     method = method.upper()
     return {
         "id": endpoint_id(method, path),
@@ -32,7 +35,7 @@ def ep(
     }
 
 
-GROUPS = [
+GROUPS: list[dict[str, Any]] = [
     {
         "name": "Sessions",
         "description": "Create temporary browser voice sessions and receive a WebSocket URL.",
@@ -389,17 +392,17 @@ GROUPS = [
     },
 ]
 
-ENDPOINTS = [endpoint for group in GROUPS for endpoint in group["endpoints"]]
+ENDPOINTS: list[dict[str, Any]] = [endpoint for group in GROUPS for endpoint in group["endpoints"]]
 
 
-def template_to_regex(template: str):
+def template_to_regex(template: str) -> re.Pattern[str]:
     if template not in _TEMPLATE_REGEX_CACHE:
         pattern = "^" + re.sub(r"\{([^}]+)\}", r"(?P<\1>[^/?#]+)", template) + "$"
         _TEMPLATE_REGEX_CACHE[template] = re.compile(pattern)
     return _TEMPLATE_REGEX_CACHE[template]
 
 
-def match_endpoint(method: str, path: str):
+def match_endpoint(method: str, path: str) -> tuple[dict[str, Any] | None, dict[str, str]]:
     method = method.upper()
     if ".." in path or "?" in path or "#" in path:
         raise ValueError(f"Path contains illegal characters: {path}")

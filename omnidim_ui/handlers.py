@@ -7,6 +7,7 @@ import time
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from typing import Any
 
 from omnidim_ui import config
@@ -63,27 +64,27 @@ def is_read_only_active() -> bool:
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    def do_OPTIONS(self):
+    def do_OPTIONS(self) -> None:
         self.send_response(405)
         self.send_header("Allow", "GET, POST, PUT, PATCH, DELETE")
         self.end_headers()
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         self.route()
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         self.route()
 
-    def do_PUT(self):
+    def do_PUT(self) -> None:
         self.route()
 
-    def do_PATCH(self):
+    def do_PATCH(self) -> None:
         self.route()
 
-    def do_DELETE(self):
+    def do_DELETE(self) -> None:
         self.route()
 
-    def log_message(self, fmt, *args):
+    def log_message(self, fmt: str, *args: Any) -> None:
         logger.info("%s - %s", self.address_string(), fmt % args)
 
     def is_authenticated(self) -> bool:
@@ -111,7 +112,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     return parts[1].strip()
         return LOCAL_AUTH_TOKEN
 
-    def route(self):
+    def route(self) -> None:
         req_id = uuid.uuid4().hex[:12]
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -190,7 +191,7 @@ class AppHandler(BaseHTTPRequestHandler):
             logger.exception("[%s] Internal server error on %s %s: %s", req_id, self.command, path, exc)
             self.send_json({"ok": False, "error": "Internal server error", "requestId": req_id}, status=500)
 
-    def route_api(self, path: str, parsed: urllib.parse.ParseResult, req_id: str):
+    def route_api(self, path: str, parsed: urllib.parse.ParseResult, req_id: str) -> None:
         if path == "/api/session" and self.command == "GET":
             self.send_json({"ok": True, "csrfToken": CSRF_TOKEN, "localToken": LOCAL_AUTH_TOKEN})
             return
@@ -250,9 +251,11 @@ class AppHandler(BaseHTTPRequestHandler):
             if self.command == "GET":
                 query = urllib.parse.parse_qs(parsed.query)
                 page = int(query.get("page", ["1"])[0])
-                limit = int(query.get("limit", [query.get("pagesize", ["50"])[0]])[0])
+                pagesize_default = query.get("pagesize", ["50"])
+                limit = int(query.get("limit", pagesize_default)[0])
                 search = query.get("search", [None])[0]
-                status = int(query.get("status")[0]) if "status" in query else None
+                status_list = query.get("status")
+                status = int(status_list[0]) if status_list else None
                 method = query.get("method", [None])[0]
 
                 history_data = get_history(
@@ -328,7 +331,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         self.send_json({"ok": False, "error": f"Unknown API endpoint: {path}", "requestId": req_id}, status=404)
 
-    def run_omni_request(self, req_id: str):
+    def run_omni_request(self, req_id: str) -> None:
         data = self.read_json()
         method = data.get("method", "GET").upper()
         path = data.get("path", "")
@@ -462,7 +465,7 @@ class AppHandler(BaseHTTPRequestHandler):
             raise ValueError(f"Request body exceeds maximum allowed size ({MAX_REQUEST_BODY_BYTES} bytes)")
         return parse_json_bytes(self.rfile.read(length))
 
-    def send_json(self, payload: dict, status: int = 200):
+    def send_json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -473,7 +476,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def serve_static(self, path: str):
+    def serve_static(self, path: str) -> None:
         if path in {"", "/"}:
             file_path = (STATIC_DIR / "index.html").resolve()
         else:
@@ -490,7 +493,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
 
             if not file_path.exists() or not file_path.is_file():
-                file_path = (STATIC_DIR / "index.html").resolve()
+                if "." not in Path(path).name:
+                    file_path = (STATIC_DIR / "index.html").resolve()
+                else:
+                    self.send_error(404)
+                    return
 
         ctype, _ = mimetypes.guess_type(str(file_path))
         if not ctype:

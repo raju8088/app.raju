@@ -13,7 +13,7 @@ from omnidim_ui.config import (
 from omnidim_ui.logging_config import logger
 
 
-def build_url(base_url: str, path: str, query: dict | None) -> str:
+def build_url(base_url: str, path: str, query: dict[str, Any] | None) -> str:
     base = base_url.rstrip("/")
     parsed_pairs = []
     for key, value in (query or {}).items():

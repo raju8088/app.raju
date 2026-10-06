@@ -84,29 +84,35 @@ def check_catalog_drift(spec_path: Path | None = None) -> dict[str, Any]:
     }
 
 
-def main():
-    report = check_catalog_drift()
-    print("=" * 60)
-    print("OmniDimension OpenAPI Drift Report")
-    print("=" * 60)
-    print(f"Total Spec Operations:    {report['totalSpecOperations']}")
-    print(f"Registered in Control UI: {report['totalCatalogOperations']}")
-    print(f"Matched Operations:       {report['coveredOperations']}")
-    print(f"Coverage:                 {report['coveragePercentage']}%")
-
+def format_drift_report(report: dict[str, Any]) -> str:
+    lines = [
+        "=" * 60,
+        "OmniDimension OpenAPI Drift Report",
+        "=" * 60,
+        f"Total Spec Operations:    {report['totalSpecOperations']}",
+        f"Registered in Control UI: {report['totalCatalogOperations']}",
+        f"Matched Operations:       {report['coveredOperations']}",
+        f"Coverage:                 {report['coveragePercentage']}%",
+    ]
     if report["unlistedInOpenAPI"]:
-        print(f"\n[!] {len(report['unlistedInOpenAPI'])} UI endpoints not present in OpenAPI spec:")
+        lines.append(f"\n[!] {len(report['unlistedInOpenAPI'])} UI endpoints not present in OpenAPI spec:")
         for m, p in report["unlistedInOpenAPI"]:
-            print(f"  - {m} {p}")
+            lines.append(f"  - {m} {p}")
 
     if report["unimplementedInCatalog"]:
-        print(f"\n[*] {len(report['unimplementedInCatalog'])} OpenAPI spec endpoints unmapped in UI:")
+        lines.append(f"\n[*] {len(report['unimplementedInCatalog'])} OpenAPI spec endpoints unmapped in UI:")
         for m, p in report["unimplementedInCatalog"][:20]:
-            print(f"  - {m} {p}")
+            lines.append(f"  - {m} {p}")
         if len(report["unimplementedInCatalog"]) > 20:
-            print(f"  ... and {len(report['unimplementedInCatalog']) - 20} more.")
+            lines.append(f"  ... and {len(report['unimplementedInCatalog']) - 20} more.")
 
-    print("=" * 60)
+    lines.append("=" * 60)
+    return "\n".join(lines)
+
+
+def main() -> None:
+    report = check_catalog_drift()
+    print(format_drift_report(report))
     if report["unlistedInOpenAPI"]:
         sys.exit(1)
     sys.exit(0)
