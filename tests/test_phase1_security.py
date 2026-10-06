@@ -301,23 +301,70 @@ def test_read_only_mode_blocks_mutations(live_server):
 
 def test_sqlite_api_key_encrypted_at_rest():
     raw_key = "sk-test-secret-value-999888777"
-    server.save_setting("api_key", raw_key)
+    source = server.save_api_key(raw_key)
 
-    # 1. Check raw row in SQLite
+    if server.IS_WINDOWS:
+        assert source == "dpapi"
+        with server.get_db() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = 'api_key'").fetchone()
+            stored_raw = row["value"]
+            assert stored_raw.startswith("dpapi:")
+            assert raw_key not in stored_raw
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv("OMNIDIM_API_KEY", raising=False)
+            retrieved_key, key_src = server.get_api_key()
+            assert retrieved_key == raw_key
+            assert key_src == "dpapi"
+    elif server.keyring:
+        assert source == "keyring"
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv("OMNIDIM_API_KEY", raising=False)
+            retrieved_key, key_src = server.get_api_key()
+            assert retrieved_key == raw_key
+            assert key_src == "keyring"
+
+
+def test_migration_of_legacy_enc_v1():
+    import hashlib
+    import hmac
+    import secrets
+
+    secret_key = secrets.token_bytes(32)
+    server.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    sec_file = server.DATA_DIR / ".secret_key"
+    sec_file.write_bytes(secret_key)
+
+    test_key = "legacy-secret-key-12345"
+    nonce = secrets.token_bytes(16)
+    k_enc = hmac.new(secret_key, b"ENC:" + nonce, hashlib.sha256).digest()
+    k_mac = hmac.new(secret_key, b"MAC:" + nonce, hashlib.sha256).digest()
+    plain_bytes = test_key.encode("utf-8")
+    blocks = (len(plain_bytes) + 31) // 32
+    keystream = b"".join(
+        hmac.new(k_enc, i.to_bytes(4, "big"), hashlib.sha256).digest() for i in range(blocks)
+    )
+    ciphertext = bytes(p ^ k for p, k in zip(plain_bytes, keystream[: len(plain_bytes)], strict=True))
+    tag = hmac.new(k_mac, nonce + ciphertext, hashlib.sha256).hexdigest()
+    legacy_payload = f"enc:v1:{nonce.hex()}:{ciphertext.hex()}:{tag}"
+
     with server.get_db() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = 'api_key'").fetchone()
-        stored_raw = row["value"]
-        assert stored_raw.startswith("enc:v1:")
-        assert raw_key not in stored_raw
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('api_key', ?, ?)",
+            (legacy_payload, server.now_iso()),
+        )
 
-    # 2. Check get_api_key decrypts properly
+    server.migrate_legacy_enc_v1()
+
+    # Secret file should be cleaned up
+    assert not sec_file.exists()
+
+    # Migrated key should be readable
     with pytest.MonkeyPatch.context() as mp:
         mp.delenv("OMNIDIM_API_KEY", raising=False)
-        if server.keyring:
-            mp.setattr(server.keyring, "get_password", lambda *args: None)
-        retrieved_key, source = server.get_api_key()
-        assert retrieved_key == raw_key
-        assert source == "db"
+        migrated_key, _ = server.get_api_key()
+        assert migrated_key == test_key
+
 
 
 def test_request_body_size_limit(live_server):

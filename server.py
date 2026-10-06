@@ -1,10 +1,13 @@
 import argparse
+import base64
+import ctypes
 import datetime as dt
 import hashlib
 import hmac
 import json
 import mimetypes
 import os
+import platform
 import re
 import secrets
 import sqlite3
@@ -22,15 +25,69 @@ try:
 except ImportError:
     keyring = None
 
+IS_WINDOWS = platform.system() == "Windows"
+
+if IS_WINDOWS:
+    import ctypes.wintypes
+
+    class _DATA_BLOB(ctypes.Structure):
+        _fields_ = [
+            ("cbData", ctypes.wintypes.DWORD),
+            ("pbData", ctypes.POINTER(ctypes.c_byte)),
+        ]
+
+    def dpapi_protect(text: str) -> str:
+        """Encrypt secret string using Windows DPAPI (tied to current user logon)."""
+        data = text.encode("utf-8")
+        in_blob = _DATA_BLOB(
+            len(data),
+            ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)),
+        )
+        out_blob = _DATA_BLOB()
+        if not ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(in_blob), "OmniDimension API Key", None, None, None, 0, ctypes.byref(out_blob)
+        ):
+            raise RuntimeError("Windows DPAPI CryptProtectData failed")
+        encrypted_bytes = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        return "dpapi:" + base64.b64encode(encrypted_bytes).decode("ascii")
+
+    def dpapi_unprotect(encrypted_str: str) -> str:
+        """Decrypt secret string using Windows DPAPI."""
+        if not encrypted_str.startswith("dpapi:"):
+            raise ValueError("Not a valid DPAPI payload")
+        raw = base64.b64decode(encrypted_str[6:])
+        in_blob = _DATA_BLOB(
+            len(raw),
+            ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)),
+        )
+        out_blob = _DATA_BLOB()
+        if not ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)
+        ):
+            raise RuntimeError("Windows DPAPI CryptUnprotectData failed")
+        decrypted_bytes = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        return decrypted_bytes.decode("utf-8")
+
+else:
+
+    def dpapi_protect(text: str) -> str:
+        raise NotImplementedError("Windows DPAPI is only available on Windows")
+
+    def dpapi_unprotect(encrypted_str: str) -> str:
+        raise NotImplementedError("Windows DPAPI is only available on Windows")
+
+
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "omnidim_ui.sqlite3"
-SECRET_KEY_FILE = DATA_DIR / ".secret_key"
 DEFAULT_BASE_URL = "https://omnidim.io/api/v1"
 MAX_LOG_CHARS = 200_000
 HISTORY_RETENTION_LIMIT = 500
 MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024  # 10 MB limit
+
 
 CSRF_TOKEN = secrets.token_hex(32)
 LOCAL_AUTH_TOKEN = secrets.token_urlsafe(32)
@@ -598,79 +655,82 @@ def init_db():
             "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
             ("base_url", DEFAULT_BASE_URL, now_iso()),
         )
+    migrate_legacy_enc_v1()
 
 
-def get_or_create_master_key() -> bytes:
-    """Retrieve or generate local master secret key with 0600 permissions."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not SECRET_KEY_FILE.exists():
-        key = secrets.token_bytes(32)
-        SECRET_KEY_FILE.write_bytes(key)
+
+def migrate_legacy_enc_v1():
+    """Migrate any legacy enc:v1 secret to DPAPI or keyring, then remove data/.secret_key."""
+    secret_key_file = DATA_DIR / ".secret_key"
+    with get_db() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'api_key'").fetchone()
+        if not row or not row["value"]:
+            if secret_key_file.exists():
+                try:
+                    secret_key_file.unlink()
+                except OSError:
+                    pass
+            return
+
+        stored_val = str(row["value"]).strip()
+        if not stored_val.startswith("enc:v1:"):
+            if secret_key_file.exists():
+                try:
+                    secret_key_file.unlink()
+                except OSError:
+                    pass
+            return
+
+        plaintext = ""
+        if secret_key_file.exists():
+            try:
+                master_key = secret_key_file.read_bytes()[:32]
+                parts = stored_val.split(":")
+                if len(parts) == 5:
+                    _, _, nonce_hex, ciphertext_hex, expected_tag = parts
+                    nonce = bytes.fromhex(nonce_hex)
+                    ciphertext = bytes.fromhex(ciphertext_hex)
+                    k_enc = hmac.new(master_key, b"ENC:" + nonce, hashlib.sha256).digest()
+                    k_mac = hmac.new(master_key, b"MAC:" + nonce, hashlib.sha256).digest()
+                    actual_tag = hmac.new(k_mac, nonce + ciphertext, hashlib.sha256).hexdigest()
+                    if hmac.compare_digest(actual_tag, expected_tag):
+                        blocks = (len(ciphertext) + 31) // 32
+                        keystream = b"".join(
+                            hmac.new(k_enc, i.to_bytes(4, "big"), hashlib.sha256).digest()
+                            for i in range(blocks)
+                        )
+                        plain_bytes = bytes(c ^ k for c, k in zip(ciphertext, keystream[: len(ciphertext)], strict=True))
+                        plaintext = plain_bytes.decode("utf-8")
+            except Exception:
+                plaintext = ""
+
+        if plaintext:
+            if IS_WINDOWS:
+                try:
+                    encrypted = dpapi_protect(plaintext)
+                    conn.execute(
+                        "UPDATE settings SET value = ?, updated_at = ? WHERE key = 'api_key'",
+                        (encrypted, now_iso()),
+                    )
+                except Exception:
+                    conn.execute("DELETE FROM settings WHERE key = 'api_key'")
+            elif keyring:
+                try:
+                    keyring.set_password("omnidim_control_center", "api_key", plaintext)
+                    conn.execute("DELETE FROM settings WHERE key = 'api_key'")
+                except Exception:
+                    conn.execute("DELETE FROM settings WHERE key = 'api_key'")
+            else:
+                conn.execute("DELETE FROM settings WHERE key = 'api_key'")
+        else:
+            conn.execute("DELETE FROM settings WHERE key = 'api_key'")
+
+    if secret_key_file.exists():
         try:
-            os.chmod(SECRET_KEY_FILE, 0o600)
-        except (OSError, NotImplementedError):
+            secret_key_file.unlink()
+        except OSError:
             pass
-        return key
-    try:
-        os.chmod(SECRET_KEY_FILE, 0o600)
-    except (OSError, NotImplementedError):
-        pass
-    return SECRET_KEY_FILE.read_bytes()[:32]
 
-
-def encrypt_secret(plaintext: str) -> str:
-    """Encrypt secret string using authenticated encryption (HMAC-SHA256 Encrypt-then-MAC)."""
-    if not plaintext:
-        return ""
-    master_key = get_or_create_master_key()
-    nonce = secrets.token_bytes(16)
-    k_enc = hmac.new(master_key, b"ENC:" + nonce, hashlib.sha256).digest()
-    k_mac = hmac.new(master_key, b"MAC:" + nonce, hashlib.sha256).digest()
-
-    plain_bytes = plaintext.encode("utf-8")
-    blocks = (len(plain_bytes) + 31) // 32
-    keystream = b"".join(
-        hmac.new(k_enc, i.to_bytes(4, "big"), hashlib.sha256).digest()
-        for i in range(blocks)
-    )
-    ciphertext = bytes(p ^ k for p, k in zip(plain_bytes, keystream[: len(plain_bytes)], strict=True))
-    tag = hmac.new(k_mac, nonce + ciphertext, hashlib.sha256).hexdigest()
-    return f"enc:v1:{nonce.hex()}:{ciphertext.hex()}:{tag}"
-
-
-def decrypt_secret(stored_val: str) -> str:
-    """Decrypt secret string, verifying authenticity in constant time."""
-    if not stored_val or not stored_val.startswith("enc:v1:"):
-        return stored_val  # Support legacy plaintext fallback
-    parts = stored_val.split(":")
-    if len(parts) != 5:
-        return ""
-    _, _, nonce_hex, ciphertext_hex, expected_tag = parts
-    try:
-        nonce = bytes.fromhex(nonce_hex)
-        ciphertext = bytes.fromhex(ciphertext_hex)
-    except ValueError:
-        return ""
-
-    master_key = get_or_create_master_key()
-    k_enc = hmac.new(master_key, b"ENC:" + nonce, hashlib.sha256).digest()
-    k_mac = hmac.new(master_key, b"MAC:" + nonce, hashlib.sha256).digest()
-
-    actual_tag = hmac.new(k_mac, nonce + ciphertext, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(actual_tag, expected_tag):
-        return ""
-
-    blocks = (len(ciphertext) + 31) // 32
-    keystream = b"".join(
-        hmac.new(k_enc, i.to_bytes(4, "big"), hashlib.sha256).digest()
-        for i in range(blocks)
-    )
-    plain_bytes = bytes(c ^ k for c, k in zip(ciphertext, keystream[: len(ciphertext)], strict=True))
-
-    try:
-        return plain_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        return ""
 
 
 def issue_confirm_token(endpoint_id: str) -> str:
@@ -695,12 +755,24 @@ def consume_confirm_token(token: str, endpoint_id: str) -> bool:
 
 
 def get_api_key():
-    # 1. Environment variable has highest priority
+    # 1. Environment variable has highest priority (never stored on disk)
     env_key = os.environ.get("OMNIDIM_API_KEY", "").strip()
     if env_key:
         return env_key, "env"
 
-    # 2. OS Keyring if available
+    # 2. Windows DPAPI (stored encrypted in SQLite settings table)
+    if IS_WINDOWS:
+        with get_db() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = 'api_key'").fetchone()
+            if row and row["value"]:
+                val = str(row["value"]).strip()
+                if val.startswith("dpapi:"):
+                    try:
+                        return dpapi_unprotect(val), "dpapi"
+                    except Exception:
+                        pass
+
+    # 3. OS Keyring on macOS/Linux (or Windows if keyring package is present)
     if keyring:
         try:
             kr_key = keyring.get_password("omnidim_control_center", "api_key")
@@ -709,24 +781,46 @@ def get_api_key():
         except Exception:
             pass
 
-    # 3. SQLite settings table (encrypted at rest)
-    with get_db() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = 'api_key'").fetchone()
-        if row and row["value"]:
-            decrypted = decrypt_secret(row["value"].strip())
-            if decrypted:
-                return decrypted, "db"
-
     return "", "none"
 
 
+def save_api_key(api_key: str) -> str:
+    if not api_key:
+        return "none"
+    if IS_WINDOWS:
+        encrypted = dpapi_protect(api_key)
+        save_setting("api_key", encrypted)
+        secure_db_file()
+        return "dpapi"
+    elif keyring:
+        try:
+            keyring.set_password("omnidim_control_center", "api_key", api_key)
+            delete_setting("api_key")  # Never keep in database when using keyring
+            return "keyring"
+        except Exception as exc:
+            raise ValueError(f"Failed to store API key in OS keyring: {exc}") from exc
+    else:
+        raise ValueError(
+            "Secure OS key storage is unavailable on this system without the 'keyring' package. "
+            "Please set the OMNIDIM_API_KEY environment variable to supply your API key securely without disk storage."
+        )
+
+
+def delete_api_key():
+    if keyring:
+        try:
+            keyring.delete_password("omnidim_control_center", "api_key")
+        except Exception:
+            pass
+    delete_setting("api_key")
+
+
 def secure_db_file():
-    for f in (DB_PATH, SECRET_KEY_FILE):
-        if f.exists():
-            try:
-                os.chmod(f, 0o600)
-            except (OSError, NotImplementedError):
-                pass
+    if DB_PATH.exists():
+        try:
+            os.chmod(DB_PATH, 0o600)
+        except (OSError, NotImplementedError):
+            pass
 
 
 def read_settings(include_secret=False):
@@ -736,15 +830,11 @@ def read_settings(include_secret=False):
     api_key, source = get_api_key()
 
     if source == "env":
-        notice = "API key loaded from OMNIDIM_API_KEY environment variable (recommended)."
+        notice = "API key loaded from OMNIDIM_API_KEY environment variable (highest security; never stored on disk)."
+    elif source == "dpapi":
+        notice = "API key securely stored via Windows DPAPI (tied to your Windows user logon credentials)."
     elif source == "keyring":
-        notice = "API key loaded from OS Keychain via keyring (secure)."
-    elif source == "db":
-        notice = (
-            "API key stored encrypted at rest in local SQLite (derived from local 0600 secret file). "
-            "Note: local root/user filesystem access can read the secret key file. "
-            "Using OS keyring or OMNIDIM_API_KEY environment variable is recommended."
-        )
+        notice = "API key securely stored in OS Keychain via keyring."
     else:
         notice = "No API key configured. Provide OMNIDIM_API_KEY in environment or save via UI."
 
@@ -763,17 +853,15 @@ def read_settings(include_secret=False):
 
 
 def save_setting(key, value):
-    stored_val = encrypt_secret(value) if key == "api_key" else value
     with get_db() as conn:
         conn.execute(
             """
             INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
             """,
-            (key, stored_val, now_iso()),
+            (key, value, now_iso()),
         )
-    if key == "api_key":
-        secure_db_file()
+
 
 
 
@@ -990,25 +1078,15 @@ class AppHandler(BaseHTTPRequestHandler):
                         raise ValueError("Base URL must start with https://")
                     save_setting("base_url", base_url.rstrip("/"))
                 if api_key:
-                    if keyring:
-                        try:
-                            keyring.set_password("omnidim_control_center", "api_key", api_key)
-                        except Exception:
-                            pass
-                    save_setting("api_key", api_key)
-                    secure_db_file()
+                    save_api_key(api_key)
                 self.send_json(read_settings())
                 return
 
         if path == "/api/settings/api-key" and self.command == "DELETE":
-            if keyring:
-                try:
-                    keyring.delete_password("omnidim_control_center", "api_key")
-                except Exception:
-                    pass
-            delete_setting("api_key")
+            delete_api_key()
             self.send_json(read_settings())
             return
+
 
         if path == "/api/history":
             if self.command == "GET":
