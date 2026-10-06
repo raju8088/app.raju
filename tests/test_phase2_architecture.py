@@ -5,15 +5,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-import server
+import omnidim_ui
 from omnidim_ui import db, proxy
 from omnidim_ui.drift_check import check_catalog_drift
 
 
 @pytest.fixture(scope="module")
 def live_server():
-    server.init_db()
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.AppHandler)
+    omnidim_ui.init_db()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), omnidim_ui.AppHandler)
     host, port = httpd.server_address
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
@@ -104,7 +104,7 @@ def test_history_api_endpoint_pagination(live_server):
     conn.request(
         "GET",
         "/api/history?page=1&limit=5&search=agents",
-        headers={"Host": f"127.0.0.1:{port}", "X-Local-Token": server.LOCAL_AUTH_TOKEN},
+        headers={"Host": f"127.0.0.1:{port}", "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN},
     )
     res = conn.getresponse()
     body = json.loads(res.read().decode())

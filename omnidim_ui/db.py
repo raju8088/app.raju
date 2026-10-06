@@ -2,15 +2,16 @@ import datetime as dt
 import json
 import math
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
+from omnidim_ui import config
 from omnidim_ui.config import (
     DB_PATH,
     DEFAULT_BASE_URL,
     HISTORY_RETENTION_LIMIT,
     MAX_LOG_CHARS,
-    READ_ONLY_MODE,
 )
 from omnidim_ui.logging_config import logger
 from omnidim_ui.security import (
@@ -177,6 +178,12 @@ def read_settings(include_secret: bool = False, db_conn=None) -> dict[str, Any]:
     else:
         notice = "No API key configured. Provide OMNIDIM_API_KEY in environment or save via UI."
 
+    read_only = getattr(config, "READ_ONLY_MODE", False)
+    if "omnidim_ui" in sys.modules and getattr(sys.modules["omnidim_ui"], "READ_ONLY_MODE", False):
+        read_only = True
+    elif "server" in sys.modules and getattr(sys.modules["server"], "READ_ONLY_MODE", False):
+        read_only = True
+
     data = {
         "baseUrl": raw.get("base_url", DEFAULT_BASE_URL),
         "hasApiKey": bool(api_key),
@@ -184,7 +191,7 @@ def read_settings(include_secret: bool = False, db_conn=None) -> dict[str, Any]:
         "apiKeyPreview": f"...{api_key[-4:]}" if api_key else "",
         "securityNotice": notice,
         "retentionLimit": HISTORY_RETENTION_LIMIT,
-        "readOnly": READ_ONLY_MODE,
+        "readOnly": read_only,
     }
     if include_secret:
         data["apiKey"] = api_key

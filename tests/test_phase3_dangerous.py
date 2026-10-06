@@ -6,13 +6,13 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-import server
+import omnidim_ui
 
 
 @pytest.fixture(scope="module")
 def live_server():
-    server.init_db()
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.AppHandler)
+    omnidim_ui.init_db()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), omnidim_ui.AppHandler)
     host, port = httpd.server_address
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
@@ -22,7 +22,7 @@ def live_server():
 
 
 def test_extra_endpoints_marked_as_danger():
-    danger_endpoints = {ep["path"]: ep for ep in server.ENDPOINTS if ep.get("danger")}
+    danger_endpoints = {ep["path"]: ep for ep in omnidim_ui.ENDPOINTS if ep.get("danger")}
 
     # Requirements: phone number import (twilio, exotel, sip), add user, user access control,
     # user expiry, child concurrency, add contacts (bulk and single), KYC submit.
@@ -48,8 +48,8 @@ def test_allowlist_rejects_unregistered_paths(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -72,8 +72,8 @@ def test_danger_enforcement_returns_428_without_confirm(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -100,8 +100,8 @@ def test_danger_single_use_token_accepted_and_consumed(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -122,8 +122,8 @@ def test_danger_single_use_token_accepted_and_consumed(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res2 = conn.getresponse()
@@ -132,7 +132,6 @@ def test_danger_single_use_token_accepted_and_consumed(live_server):
     assert res2.status in (400, 200, 502)
     assert res2.status != 428
     assert "ok" in body2
-
 
     # 3. Third request tries to reuse same token -> rejected with 428 (token already consumed!)
     conn.request(
@@ -147,8 +146,8 @@ def test_danger_single_use_token_accepted_and_consumed(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res3 = conn.getresponse()
@@ -168,8 +167,8 @@ def test_danger_tampered_body_fails(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -190,8 +189,8 @@ def test_danger_tampered_body_fails(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res2 = conn.getresponse()
@@ -219,8 +218,8 @@ def test_danger_bypass_flags_rejected(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -239,8 +238,8 @@ def test_danger_bypass_flags_rejected(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res2 = conn.getresponse()
@@ -266,8 +265,8 @@ def test_danger_token_reused_after_use(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -285,8 +284,8 @@ def test_danger_token_reused_after_use(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res2 = conn.getresponse()
@@ -301,8 +300,8 @@ def test_danger_token_reused_after_use(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res3 = conn.getresponse()
@@ -331,8 +330,8 @@ def test_danger_token_expired(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -341,9 +340,9 @@ def test_danger_token_expired(live_server):
     token = body["confirmToken"]
 
     # 2. Fast forward token creation time past CONFIRMATION_TOKEN_TTL (60s)
-    created_at, ep_id, sig, *rest = server.CONFIRMATION_TOKENS[token]
+    created_at, ep_id, sig, *rest = omnidim_ui.CONFIRMATION_TOKENS[token]
     sess = rest[0] if rest else ""
-    server.CONFIRMATION_TOKENS[token] = (time.time() - 75, ep_id, sig, sess)
+    omnidim_ui.CONFIRMATION_TOKENS[token] = (time.time() - 75, ep_id, sig, sess)
 
     # 3. Request with expired token should be rejected with 428
     payload_with_token = dict(payload)
@@ -355,8 +354,8 @@ def test_danger_token_expired(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res2 = conn.getresponse()
@@ -367,30 +366,28 @@ def test_danger_token_expired(live_server):
     assert "expired" in body2["error"].lower()
 
 
-
-
 def test_path_parameter_character_rejection():
     # Attempt path traversal in path parameter
     with pytest.raises(ValueError, match="illegal characters"):
-        server.match_endpoint("GET", "/agents/../secret")
+        omnidim_ui.match_endpoint("GET", "/agents/../secret")
 
     with pytest.raises(ValueError, match="illegal characters"):
-        server.match_endpoint("GET", "/agents/123?query=1")
+        omnidim_ui.match_endpoint("GET", "/agents/123?query=1")
 
     with pytest.raises(ValueError, match="illegal characters"):
-        server.match_endpoint("GET", "/agents/123#fragment")
+        omnidim_ui.match_endpoint("GET", "/agents/123#fragment")
 
     with pytest.raises(ValueError, match="illegal characters"):
-        server.match_endpoint("GET", "/agents/123\x00bad")
+        omnidim_ui.match_endpoint("GET", "/agents/123\x00bad")
 
 
 def test_path_parameter_matching_valid():
-    ep, params = server.match_endpoint("GET", "/agents/158910")
+    ep, params = omnidim_ui.match_endpoint("GET", "/agents/158910")
     assert ep is not None
     assert ep["path"] == "/agents/{agent_id}"
     assert params["agent_id"] == "158910"
 
-    ep_multi, params_multi = server.match_endpoint("PATCH", "/agents/42/versions/3")
+    ep_multi, params_multi = omnidim_ui.match_endpoint("PATCH", "/agents/42/versions/3")
     assert ep_multi is not None
     assert ep_multi["path"] == "/agents/{agent_id}/versions/{version_number}"
     assert params_multi["agent_id"] == "42"
@@ -398,15 +395,15 @@ def test_path_parameter_matching_valid():
 
 
 def test_confirmation_token_concurrent_consumption():
-    sig = server.compute_danger_signature("POST", "/calls/dispatch", {}, {"num": 1})
-    token = server.issue_confirm_token("post-calls-dispatch", sig, session_id="test-session")
+    sig = omnidim_ui.compute_danger_signature("POST", "/calls/dispatch", {}, {"num": 1})
+    token = omnidim_ui.issue_confirm_token("post-calls-dispatch", sig, session_id="test-session")
 
     results = []
     barrier = threading.Barrier(20)
 
     def worker():
         barrier.wait()
-        res = server.consume_confirm_token(token, "post-calls-dispatch", sig, session_id="test-session")
+        res = omnidim_ui.consume_confirm_token(token, "post-calls-dispatch", sig, session_id="test-session")
         results.append(res)
 
     threads = [threading.Thread(target=worker) for _ in range(20)]
@@ -425,8 +422,8 @@ def test_confirmation_token_concurrent_consumption():
 
 def test_confirmation_token_purged_on_access():
     old_token = "expired-token-canary-12345"
-    with server.security.TOKEN_LOCK:
-        server.CONFIRMATION_TOKENS[old_token] = (
+    with omnidim_ui.security.TOKEN_LOCK:
+        omnidim_ui.CONFIRMATION_TOKENS[old_token] = (
             time.time() - 120,
             "ep-test",
             "dummy-sig",
@@ -434,26 +431,25 @@ def test_confirmation_token_purged_on_access():
         )
 
     # Issue a new token - this triggers access and purge
-    new_sig = server.compute_danger_signature("POST", "/calls/dispatch", {}, {})
-    new_token = server.issue_confirm_token("ep-test", new_sig, session_id="sess")
+    new_sig = omnidim_ui.compute_danger_signature("POST", "/calls/dispatch", {}, {})
+    new_token = omnidim_ui.issue_confirm_token("ep-test", new_sig, session_id="sess")
 
     # Verify expired token was purged from dictionary
-    assert old_token not in server.CONFIRMATION_TOKENS
-    assert new_token in server.CONFIRMATION_TOKENS
+    assert old_token not in omnidim_ui.CONFIRMATION_TOKENS
+    assert new_token in omnidim_ui.CONFIRMATION_TOKENS
 
 
 def test_confirmation_token_session_binding():
-    sig = server.compute_danger_signature("POST", "/calls/dispatch", {}, {})
+    sig = omnidim_ui.compute_danger_signature("POST", "/calls/dispatch", {}, {})
 
     # 1. Token issued for Alice is rejected when presented by Bob's session
-    token_alice = server.issue_confirm_token("ep-test", sig, session_id="session-user-alice")
-    ok_bob, msg_bob = server.consume_confirm_token(token_alice, "ep-test", sig, session_id="session-user-bob")
+    token_alice = omnidim_ui.issue_confirm_token("ep-test", sig, session_id="session-user-alice")
+    ok_bob, msg_bob = omnidim_ui.consume_confirm_token(token_alice, "ep-test", sig, session_id="session-user-bob")
     assert ok_bob is False
     assert "different local session" in msg_bob
 
     # 2. Token issued for Alice is accepted when presented by Alice's session
-    token_valid = server.issue_confirm_token("ep-test", sig, session_id="session-user-alice")
-    ok_alice, msg_alice = server.consume_confirm_token(token_valid, "ep-test", sig, session_id="session-user-alice")
+    token_valid = omnidim_ui.issue_confirm_token("ep-test", sig, session_id="session-user-alice")
+    ok_alice, msg_alice = omnidim_ui.consume_confirm_token(token_valid, "ep-test", sig, session_id="session-user-alice")
     assert ok_alice is True
     assert msg_alice == "ok"
-

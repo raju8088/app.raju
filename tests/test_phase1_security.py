@@ -2,17 +2,18 @@ import http.client
 import json
 import threading
 import urllib.parse
+import uuid
 from http.server import ThreadingHTTPServer
 
 import pytest
 
-import server
+import omnidim_ui
 
 
 @pytest.fixture(scope="module")
 def live_server():
-    server.init_db()
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.AppHandler)
+    omnidim_ui.init_db()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), omnidim_ui.AppHandler)
     host, port = httpd.server_address
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
@@ -27,7 +28,7 @@ def test_host_header_rejection(live_server):
     conn.request(
         "GET",
         "/api/endpoints",
-        headers={"Host": "attacker.com", "X-Local-Token": server.LOCAL_AUTH_TOKEN},
+        headers={"Host": "attacker.com", "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN},
     )
     res = conn.getresponse()
     body = json.loads(res.read().decode())
@@ -57,14 +58,14 @@ def test_host_header_rejection(live_server):
 def test_dns_rebinding_host_header_rejected(live_server, rebinding_host):
     host_port, port = live_server
     # Test validator function directly
-    assert server.is_valid_host(rebinding_host) is False
+    assert omnidim_ui.is_valid_host(rebinding_host) is False
 
     # Test HTTP handler rejection
     conn = http.client.HTTPConnection("127.0.0.1", port)
     conn.request(
         "GET",
         "/api/endpoints",
-        headers={"Host": rebinding_host, "X-Local-Token": server.LOCAL_AUTH_TOKEN},
+        headers={"Host": rebinding_host, "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN},
     )
     res = conn.getresponse()
     body = json.loads(res.read().decode())
@@ -81,7 +82,7 @@ def test_host_header_allowed(live_server):
     conn.request(
         "GET",
         "/api/endpoints",
-        headers={"Host": f"127.0.0.1:{port}", "X-Local-Token": server.LOCAL_AUTH_TOKEN},
+        headers={"Host": f"127.0.0.1:{port}", "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN},
     )
     res = conn.getresponse()
     body = json.loads(res.read().decode())
@@ -127,7 +128,7 @@ def test_local_token_auth_via_cookie_succeeds(live_server):
     conn.request(
         "GET",
         "/api/endpoints",
-        headers={"Host": f"127.0.0.1:{port}", "Cookie": f"local_token={server.LOCAL_AUTH_TOKEN}"},
+        headers={"Host": f"127.0.0.1:{port}", "Cookie": f"local_token={omnidim_ui.LOCAL_AUTH_TOKEN}"},
     )
     res = conn.getresponse()
     body = json.loads(res.read().decode())
@@ -145,7 +146,7 @@ def test_content_type_enforcement_on_mutating_requests(live_server):
         "POST",
         "/api/settings",
         body=b'{"baseUrl":"https://omnidim.io/api/v1"}',
-        headers={"Host": f"127.0.0.1:{port}", "X-Local-Token": server.LOCAL_AUTH_TOKEN},
+        headers={"Host": f"127.0.0.1:{port}", "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN},
     )
     res = conn.getresponse()
     body = json.loads(res.read().decode())
@@ -168,8 +169,8 @@ def test_origin_header_validation(live_server):
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
             "Origin": "http://evil-attacker.com",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -193,7 +194,7 @@ def test_csrf_token_enforcement(live_server):
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
             "Origin": f"http://127.0.0.1:{port}",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -212,7 +213,7 @@ def test_csrf_token_enforcement(live_server):
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
             "Origin": f"http://127.0.0.1:{port}",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
             "X-CSRF-Token": "bogus-csrf-token",
         },
     )
@@ -232,8 +233,8 @@ def test_csrf_token_enforcement(live_server):
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
             "Origin": f"http://127.0.0.1:{port}",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -249,7 +250,7 @@ def test_session_endpoint_returns_csrf_and_local_token(live_server):
     conn.request(
         "GET",
         "/api/session",
-        headers={"Host": f"127.0.0.1:{port}", "X-Local-Token": server.LOCAL_AUTH_TOKEN},
+        headers={"Host": f"127.0.0.1:{port}", "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN},
     )
     res = conn.getresponse()
     body = json.loads(res.read().decode())
@@ -257,8 +258,8 @@ def test_session_endpoint_returns_csrf_and_local_token(live_server):
 
     assert res.status == 200
     assert body["ok"] is True
-    assert body["csrfToken"] == server.CSRF_TOKEN
-    assert body["localToken"] == server.LOCAL_AUTH_TOKEN
+    assert body["csrfToken"] == omnidim_ui.CSRF_TOKEN
+    assert body["localToken"] == omnidim_ui.LOCAL_AUTH_TOKEN
 
 
 def test_options_no_cors_headers(live_server):
@@ -292,8 +293,8 @@ def test_static_security_headers_and_cookie_injection(live_server):
     assert frame == "DENY"
     assert ref == "no-referrer"
     assert "default-src 'self'" in (csp or "")
-    assert f'<meta name="csrf-token" content="{server.CSRF_TOKEN}">' in body
-    assert f'<meta name="local-token" content="{server.LOCAL_AUTH_TOKEN}">' in body
+    assert f'<meta name="csrf-token" content="{omnidim_ui.CSRF_TOKEN}">' in body
+    assert f'<meta name="local-token" content="{omnidim_ui.LOCAL_AUTH_TOKEN}">' in body
     assert "HttpOnly" in (cookie or "")
     assert "SameSite=Strict" in (cookie or "")
 
@@ -311,7 +312,7 @@ def test_static_path_traversal_prevention(live_server):
 
 def test_read_only_mode_blocks_mutations(live_server):
     host_port, port = live_server
-    server.READ_ONLY_MODE = True
+    omnidim_ui.READ_ONLY_MODE = True
     try:
         conn = http.client.HTTPConnection("127.0.0.1", port)
         conn.request(
@@ -322,8 +323,8 @@ def test_read_only_mode_blocks_mutations(live_server):
                 "Host": f"127.0.0.1:{port}",
                 "Content-Type": "application/json",
                 "Origin": f"http://127.0.0.1:{port}",
-                "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-                "X-CSRF-Token": server.CSRF_TOKEN,
+                "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+                "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
             },
         )
         res = conn.getresponse()
@@ -333,16 +334,16 @@ def test_read_only_mode_blocks_mutations(live_server):
         assert res.status == 403
         assert "read-only mode" in body["error"]
     finally:
-        server.READ_ONLY_MODE = False
+        omnidim_ui.READ_ONLY_MODE = False
 
 
 def test_sqlite_api_key_encrypted_at_rest():
     raw_key = "sk-test-secret-value-999888777"
-    source = server.save_api_key(raw_key)
+    source = omnidim_ui.save_api_key(raw_key)
 
-    if server.IS_WINDOWS:
+    if omnidim_ui.IS_WINDOWS:
         assert source == "dpapi"
-        with server.get_db() as conn:
+        with omnidim_ui.get_db() as conn:
             row = conn.execute("SELECT value FROM settings WHERE key = 'api_key'").fetchone()
             stored_raw = row["value"]
             assert stored_raw.startswith("dpapi:")
@@ -350,14 +351,14 @@ def test_sqlite_api_key_encrypted_at_rest():
 
         with pytest.MonkeyPatch.context() as mp:
             mp.delenv("OMNIDIM_API_KEY", raising=False)
-            retrieved_key, key_src = server.get_api_key()
+            retrieved_key, key_src = omnidim_ui.get_api_key()
             assert retrieved_key == raw_key
             assert key_src == "dpapi"
-    elif server.keyring:
+    elif omnidim_ui.security.keyring:
         assert source == "keyring"
         with pytest.MonkeyPatch.context() as mp:
             mp.delenv("OMNIDIM_API_KEY", raising=False)
-            retrieved_key, key_src = server.get_api_key()
+            retrieved_key, key_src = omnidim_ui.get_api_key()
             assert retrieved_key == raw_key
             assert key_src == "keyring"
 
@@ -368,8 +369,8 @@ def test_migration_of_legacy_enc_v1():
     import secrets
 
     secret_key = secrets.token_bytes(32)
-    server.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    sec_file = server.DATA_DIR / ".secret_key"
+    omnidim_ui.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    sec_file = omnidim_ui.DATA_DIR / ".secret_key"
     sec_file.write_bytes(secret_key)
 
     test_key = "legacy-secret-key-12345"
@@ -385,13 +386,13 @@ def test_migration_of_legacy_enc_v1():
     tag = hmac.new(k_mac, nonce + ciphertext, hashlib.sha256).hexdigest()
     legacy_payload = f"enc:v1:{nonce.hex()}:{ciphertext.hex()}:{tag}"
 
-    with server.get_db() as conn:
+    with omnidim_ui.get_db() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('api_key', ?, ?)",
-            (legacy_payload, server.now_iso()),
+            (legacy_payload, omnidim_ui.now_iso()),
         )
 
-    server.migrate_legacy_enc_v1()
+    omnidim_ui.migrate_legacy_enc_v1()
 
     # Secret file should be cleaned up
     assert not sec_file.exists()
@@ -399,9 +400,8 @@ def test_migration_of_legacy_enc_v1():
     # Migrated key should be readable
     with pytest.MonkeyPatch.context() as mp:
         mp.delenv("OMNIDIM_API_KEY", raising=False)
-        migrated_key, _ = server.get_api_key()
+        migrated_key, _ = omnidim_ui.get_api_key()
         assert migrated_key == test_key
-
 
 
 def test_request_body_size_limit(live_server):
@@ -415,10 +415,10 @@ def test_request_body_size_limit(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
-            "Content-Length": str(server.MAX_REQUEST_BODY_BYTES + 1024),
+            "Content-Length": str(omnidim_ui.MAX_REQUEST_BODY_BYTES + 1024),
             "Origin": f"http://127.0.0.1:{port}",
-            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
-            "X-CSRF-Token": server.CSRF_TOKEN,
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
         },
     )
     res = conn.getresponse()
@@ -438,7 +438,7 @@ def test_request_history_redaction_secrets_not_persisted():
     canary_token = "canary-jwt-token-abcdef123456"
     canary_query_val = "canary-url-query-secret-555"
 
-    endpoint_test_id = f"test-redact-{server.uuid.uuid4().hex[:8]}"
+    endpoint_test_id = f"test-redact-{uuid.uuid4().hex[:8]}"
 
     req_payload = {
         "api_key": canary_api_key,
@@ -461,7 +461,7 @@ def test_request_history_redaction_secrets_not_persisted():
     raw_url = f"https://api.omnidim.io/v1/test?api_key={canary_query_val}&safe_param=hello"
 
     # Log to history
-    server.log_history(
+    omnidim_ui.log_history(
         endpoint_id_value=endpoint_test_id,
         method="POST",
         path="/v1/test",
@@ -474,7 +474,7 @@ def test_request_history_redaction_secrets_not_persisted():
     )
 
     # Query the SQLite request_history table directly
-    with server.get_db() as conn:
+    with omnidim_ui.get_db() as conn:
         row = conn.execute(
             "SELECT url, request_json, response_json FROM request_history WHERE endpoint_id = ?",
             (endpoint_test_id,),
@@ -503,4 +503,3 @@ def test_request_history_redaction_secrets_not_persisted():
     assert "[REDACTED]" in saved_req
     assert "[REDACTED]" in saved_res
     assert "keep-me-safe" in saved_req
-

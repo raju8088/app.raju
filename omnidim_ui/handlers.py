@@ -55,6 +55,8 @@ def parse_json_bytes(raw: bytes) -> Any:
 def is_read_only_active() -> bool:
     if getattr(config, "READ_ONLY_MODE", False):
         return True
+    if "omnidim_ui" in sys.modules and getattr(sys.modules["omnidim_ui"], "READ_ONLY_MODE", False):
+        return True
     if "server" in sys.modules and getattr(sys.modules["server"], "READ_ONLY_MODE", False):
         return True
     return False

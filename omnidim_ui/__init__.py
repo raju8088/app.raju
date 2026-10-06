@@ -4,6 +4,7 @@ A production-quality local browser UI and proxy server for the OmniDimension
 voice-agent platform API.
 """
 
+from omnidim_ui import config, db, endpoints, handlers, logging_config, proxy, security
 from omnidim_ui.config import (
     BASE_DIR,
     CONFIRMATION_TOKEN_TTL,
@@ -45,6 +46,7 @@ from omnidim_ui.proxy import build_url, decode_response, execute_proxy_request
 from omnidim_ui.security import (
     CONFIRMATION_TOKENS,
     CSRF_TOKEN,
+    IS_WINDOWS,
     LOCAL_AUTH_TOKEN,
     compute_danger_signature,
     consume_confirm_token,
@@ -66,6 +68,14 @@ from omnidim_ui.security import (
 __version__ = "1.0.0"
 
 __all__ = [
+    "config",
+    "db",
+    "endpoints",
+    "handlers",
+    "logging_config",
+    "proxy",
+    "security",
+    "IS_WINDOWS",
     "AppHandler",
     "BASE_DIR",
     "CONFIRMATION_TOKENS",
