@@ -12,6 +12,9 @@ ENV/
 # Data & local databases (Phase 0 secret hygiene)
 data/*.sqlite3*
 *.sqlite3*
+data/.secret_key*
+.secret_key*
+
 
 # Environment variables & credentials
 .env*
@@ -24,6 +27,8 @@ data/*.sqlite3*
 # Testing & Dev caches
 .pytest_cache/
 .ruff_cache/
+uv.lock
+
 
 # IDE & OS
 .vscode/

@@ -8,7 +8,8 @@ const state = {
   savedPayloads: [],
   view: "endpoints",
   lastResponse: null,
-  csrfToken: ""
+  csrfToken: "",
+  localToken: ""
 };
 
 const refs = {};
@@ -25,18 +26,40 @@ async function init() {
 }
 
 async function loadSession() {
-  const metaToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content");
-  if (metaToken) {
-    state.csrfToken = metaToken;
-    return;
-  }
-  try {
-    const data = await api("/api/session");
-    if (data && data.csrfToken) {
-      state.csrfToken = data.csrfToken;
+  // 1. Check URL fragment for one-time token handover
+  const hash = window.location.hash || "";
+  if (hash.includes("token=")) {
+    const match = hash.match(/token=([^&]+)/);
+    if (match) {
+      state.localToken = decodeURIComponent(match[1]);
+      history.replaceState(null, "", window.location.pathname + window.location.search);
     }
-  } catch (err) {
-    console.warn("Could not load CSRF token:", err);
+  }
+
+  // 2. Check meta tags
+  if (!state.localToken) {
+    const metaLocal = document.querySelector('meta[name="local-token"]')?.getAttribute("content");
+    if (metaLocal) {
+      state.localToken = metaLocal;
+    }
+  }
+
+  const metaCsrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content");
+  if (metaCsrf) {
+    state.csrfToken = metaCsrf;
+  }
+
+  // 3. Fallback to /api/session if needed
+  if (!state.csrfToken || !state.localToken) {
+    try {
+      const data = await api("/api/session");
+      if (data) {
+        if (data.csrfToken) state.csrfToken = data.csrfToken;
+        if (data.localToken && !state.localToken) state.localToken = data.localToken;
+      }
+    } catch (err) {
+      console.warn("Could not load session metadata:", err);
+    }
   }
 }
 
@@ -65,6 +88,7 @@ function cacheRefs() {
     "historyRows",
     "savedPayloadList",
     "clearHistoryBtn",
+    "readOnlyBadge",
     "toast"
   ].forEach((id) => {
     refs[id] = document.getElementById(id);
@@ -87,6 +111,9 @@ async function api(path, options = {}) {
     "Content-Type": "application/json",
     ...(options.headers || {})
   };
+  if (state.localToken) {
+    headers["X-Local-Token"] = state.localToken;
+  }
   if (["POST", "PUT", "PATCH", "DELETE"].includes(method) && state.csrfToken) {
     headers["X-CSRF-Token"] = state.csrfToken;
   }
@@ -114,7 +141,11 @@ async function loadSettings() {
   refs.apiKeyInput.placeholder = state.settings.hasApiKey
     ? `Saved ${state.settings.apiKeyPreview}`
     : "Paste key to save";
+  if (refs.readOnlyBadge) {
+    refs.readOnlyBadge.hidden = !state.settings.readOnly;
+  }
 }
+
 
 async function loadHistory() {
   const data = await api("/api/history?limit=100");
@@ -472,7 +503,9 @@ async function runEndpoint(endpoint) {
         return;
       }
       payload.confirm = confirmation;
+      payload.confirmed = true;
     }
+
 
     const meta = document.getElementById("responseMeta");
     const output = document.getElementById("responseOutput");

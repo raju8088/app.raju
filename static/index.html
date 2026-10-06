@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="csrf-token" content="">
+    <meta name="local-token" content="">
     <title>OmniDimension Control Center</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -40,9 +41,13 @@
       <main class="workspace">
         <header class="topbar">
           <div>
-            <p class="eyebrow">API control center</p>
+            <div class="title-with-badge">
+              <p class="eyebrow">API control center</p>
+              <span id="readOnlyBadge" class="read-only-badge" hidden>READ-ONLY MODE</span>
+            </div>
             <h1>OmniDimension</h1>
           </div>
+
           <div class="settings-strip" aria-label="API settings">
             <label>
               <span>Base URL</span>

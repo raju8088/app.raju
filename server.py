@@ -1,5 +1,6 @@
 import argparse
 import datetime as dt
+import hashlib
 import hmac
 import json
 import mimetypes
@@ -25,22 +26,31 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "omnidim_ui.sqlite3"
+SECRET_KEY_FILE = DATA_DIR / ".secret_key"
 DEFAULT_BASE_URL = "https://omnidim.io/api/v1"
 MAX_LOG_CHARS = 200_000
 HISTORY_RETENTION_LIMIT = 500
+MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024  # 10 MB limit
 
 CSRF_TOKEN = secrets.token_hex(32)
+LOCAL_AUTH_TOKEN = secrets.token_urlsafe(32)
+READ_ONLY_MODE = False
+
+CONFIRMATION_TOKENS = {}  # token -> (timestamp, endpoint_id)
+CONFIRMATION_TOKEN_TTL = 60  # seconds
 
 REDACT_KEYS = {
     "password",
     "token",
     "secret",
     "api_key",
+    "api_token",
     "auth_token",
     "sip_password",
     "account_sid",
     "authorization",
 }
+
 
 
 def redact_payload(obj):
@@ -590,6 +600,100 @@ def init_db():
         )
 
 
+def get_or_create_master_key() -> bytes:
+    """Retrieve or generate local master secret key with 0600 permissions."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not SECRET_KEY_FILE.exists():
+        key = secrets.token_bytes(32)
+        SECRET_KEY_FILE.write_bytes(key)
+        try:
+            os.chmod(SECRET_KEY_FILE, 0o600)
+        except (OSError, NotImplementedError):
+            pass
+        return key
+    try:
+        os.chmod(SECRET_KEY_FILE, 0o600)
+    except (OSError, NotImplementedError):
+        pass
+    return SECRET_KEY_FILE.read_bytes()[:32]
+
+
+def encrypt_secret(plaintext: str) -> str:
+    """Encrypt secret string using authenticated encryption (HMAC-SHA256 Encrypt-then-MAC)."""
+    if not plaintext:
+        return ""
+    master_key = get_or_create_master_key()
+    nonce = secrets.token_bytes(16)
+    k_enc = hmac.new(master_key, b"ENC:" + nonce, hashlib.sha256).digest()
+    k_mac = hmac.new(master_key, b"MAC:" + nonce, hashlib.sha256).digest()
+
+    plain_bytes = plaintext.encode("utf-8")
+    blocks = (len(plain_bytes) + 31) // 32
+    keystream = b"".join(
+        hmac.new(k_enc, i.to_bytes(4, "big"), hashlib.sha256).digest()
+        for i in range(blocks)
+    )
+    ciphertext = bytes(p ^ k for p, k in zip(plain_bytes, keystream[: len(plain_bytes)], strict=True))
+    tag = hmac.new(k_mac, nonce + ciphertext, hashlib.sha256).hexdigest()
+    return f"enc:v1:{nonce.hex()}:{ciphertext.hex()}:{tag}"
+
+
+def decrypt_secret(stored_val: str) -> str:
+    """Decrypt secret string, verifying authenticity in constant time."""
+    if not stored_val or not stored_val.startswith("enc:v1:"):
+        return stored_val  # Support legacy plaintext fallback
+    parts = stored_val.split(":")
+    if len(parts) != 5:
+        return ""
+    _, _, nonce_hex, ciphertext_hex, expected_tag = parts
+    try:
+        nonce = bytes.fromhex(nonce_hex)
+        ciphertext = bytes.fromhex(ciphertext_hex)
+    except ValueError:
+        return ""
+
+    master_key = get_or_create_master_key()
+    k_enc = hmac.new(master_key, b"ENC:" + nonce, hashlib.sha256).digest()
+    k_mac = hmac.new(master_key, b"MAC:" + nonce, hashlib.sha256).digest()
+
+    actual_tag = hmac.new(k_mac, nonce + ciphertext, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(actual_tag, expected_tag):
+        return ""
+
+    blocks = (len(ciphertext) + 31) // 32
+    keystream = b"".join(
+        hmac.new(k_enc, i.to_bytes(4, "big"), hashlib.sha256).digest()
+        for i in range(blocks)
+    )
+    plain_bytes = bytes(c ^ k for c, k in zip(ciphertext, keystream[: len(ciphertext)], strict=True))
+
+    try:
+        return plain_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
+def issue_confirm_token(endpoint_id: str) -> str:
+    """Issue a single-use confirmation token for a dangerous action."""
+    now = time.time()
+    expired = [k for k, (ts, _) in CONFIRMATION_TOKENS.items() if now - ts > CONFIRMATION_TOKEN_TTL]
+    for k in expired:
+        CONFIRMATION_TOKENS.pop(k, None)
+    token = secrets.token_hex(16)
+    CONFIRMATION_TOKENS[token] = (now, endpoint_id)
+    return token
+
+
+def consume_confirm_token(token: str, endpoint_id: str) -> bool:
+    """Validate and consume a single-use confirmation token."""
+    now = time.time()
+    if token in CONFIRMATION_TOKENS:
+        ts, ep_id = CONFIRMATION_TOKENS.pop(token)
+        if now - ts <= CONFIRMATION_TOKEN_TTL and ep_id == endpoint_id:
+            return True
+    return False
+
+
 def get_api_key():
     # 1. Environment variable has highest priority
     env_key = os.environ.get("OMNIDIM_API_KEY", "").strip()
@@ -605,21 +709,24 @@ def get_api_key():
         except Exception:
             pass
 
-    # 3. SQLite settings table
+    # 3. SQLite settings table (encrypted at rest)
     with get_db() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = 'api_key'").fetchone()
         if row and row["value"]:
-            return row["value"].strip(), "db"
+            decrypted = decrypt_secret(row["value"].strip())
+            if decrypted:
+                return decrypted, "db"
 
     return "", "none"
 
 
 def secure_db_file():
-    if DB_PATH.exists():
-        try:
-            os.chmod(DB_PATH, 0o600)
-        except (OSError, NotImplementedError):
-            pass
+    for f in (DB_PATH, SECRET_KEY_FILE):
+        if f.exists():
+            try:
+                os.chmod(f, 0o600)
+            except (OSError, NotImplementedError):
+                pass
 
 
 def read_settings(include_secret=False):
@@ -633,7 +740,11 @@ def read_settings(include_secret=False):
     elif source == "keyring":
         notice = "API key loaded from OS Keychain via keyring (secure)."
     elif source == "db":
-        notice = "API key saved in local SQLite database. Setting OMNIDIM_API_KEY environment variable or using OS keyring is recommended for higher security."
+        notice = (
+            "API key stored encrypted at rest in local SQLite (derived from local 0600 secret file). "
+            "Note: local root/user filesystem access can read the secret key file. "
+            "Using OS keyring or OMNIDIM_API_KEY environment variable is recommended."
+        )
     else:
         notice = "No API key configured. Provide OMNIDIM_API_KEY in environment or save via UI."
 
@@ -644,6 +755,7 @@ def read_settings(include_secret=False):
         "apiKeyPreview": f"...{api_key[-4:]}" if api_key else "",
         "securityNotice": notice,
         "retentionLimit": HISTORY_RETENTION_LIMIT,
+        "readOnly": READ_ONLY_MODE,
     }
     if include_secret:
         data["apiKey"] = api_key
@@ -651,14 +763,18 @@ def read_settings(include_secret=False):
 
 
 def save_setting(key, value):
+    stored_val = encrypt_secret(value) if key == "api_key" else value
     with get_db() as conn:
         conn.execute(
             """
             INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
             """,
-            (key, value, now_iso()),
+            (key, stored_val, now_iso()),
         )
+    if key == "api_key":
+        secure_db_file()
+
 
 
 def delete_setting(key):
@@ -729,7 +845,8 @@ def log_history(endpoint_id_value, method, path, url, status, ok, duration_ms, r
 
 class AppHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
-        self.send_response(204)
+        self.send_response(405)
+        self.send_header("Allow", "GET, POST, PUT, PATCH, DELETE")
         self.end_headers()
 
     def do_GET(self):
@@ -750,6 +867,19 @@ class AppHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
 
+    def is_authenticated(self) -> bool:
+        token_hdr = self.headers.get("X-Local-Token", "").strip()
+        if token_hdr and hmac.compare_digest(token_hdr, LOCAL_AUTH_TOKEN):
+            return True
+        cookie_hdr = self.headers.get("Cookie", "")
+        if cookie_hdr:
+            for item in cookie_hdr.split(";"):
+                parts = item.strip().split("=", 1)
+                if len(parts) == 2 and parts[0].strip() == "local_token":
+                    if hmac.compare_digest(parts[1].strip(), LOCAL_AUTH_TOKEN):
+                        return True
+        return False
+
     def route(self):
         req_id = uuid.uuid4().hex[:12]
         parsed = urllib.parse.urlparse(self.path)
@@ -765,7 +895,31 @@ class AppHandler(BaseHTTPRequestHandler):
                     )
                     return
 
-                # 2. Mutating requests validation (POST, PUT, PATCH, DELETE)
+                # 2. Local auth token check
+                if not self.is_authenticated():
+                    self.send_json(
+                        {
+                            "ok": False,
+                            "error": "Unauthorized: valid local auth token required in X-Local-Token header or cookie",
+                            "requestId": req_id,
+                        },
+                        status=401,
+                    )
+                    return
+
+                # 3. Read-only mode enforcement
+                if READ_ONLY_MODE and self.command != "GET":
+                    self.send_json(
+                        {
+                            "ok": False,
+                            "error": "Server is running in read-only mode. Mutating actions are blocked.",
+                            "requestId": req_id,
+                        },
+                        status=403,
+                    )
+                    return
+
+                # 4. Mutating requests validation (POST, PUT, PATCH, DELETE)
                 if self.command in {"POST", "PUT", "PATCH", "DELETE"}:
                     content_type = self.headers.get("Content-Type", "")
                     if not content_type.lower().startswith("application/json"):
@@ -803,12 +957,21 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def route_api(self, path, parsed, req_id):
         if path == "/api/session" and self.command == "GET":
-            self.send_json({"ok": True, "csrfToken": CSRF_TOKEN})
+            self.send_json({"ok": True, "csrfToken": CSRF_TOKEN, "localToken": LOCAL_AUTH_TOKEN})
             return
 
         if path == "/api/health" and self.command == "GET":
-            self.send_json({"ok": True, "time": now_iso(), "database": str(DB_PATH), "endpointCount": len(ENDPOINTS)})
+            self.send_json(
+                {
+                    "ok": True,
+                    "time": now_iso(),
+                    "database": str(DB_PATH),
+                    "endpointCount": len(ENDPOINTS),
+                    "readOnly": READ_ONLY_MODE,
+                }
+            )
             return
+
 
         if path == "/api/endpoints" and self.command == "GET":
             self.send_json({"groups": GROUPS, "endpoints": ENDPOINTS})
@@ -962,13 +1125,24 @@ class AppHandler(BaseHTTPRequestHandler):
         # 2. Server-side enforcement of danger flag
         if matched_endpoint.get("danger"):
             expected_summary = matched_endpoint["summary"].strip()
-            if confirm != expected_summary:
+            is_confirmed = False
+            confirm_token = data.get("confirmToken", "").strip()
+            if confirm_token and consume_confirm_token(confirm_token, matched_endpoint["id"]):
+                is_confirmed = True
+            elif data.get("confirmed") is True:
+                is_confirmed = True
+            elif confirm == expected_summary:
+                is_confirmed = True
+
+            if not is_confirmed:
+                token = issue_confirm_token(matched_endpoint["id"])
                 self.send_json(
                     {
                         "ok": False,
-                        "error": f"Dangerous action requires explicit confirmation phrase: '{expected_summary}'",
+                        "error": f"Dangerous action requires explicit confirmation for '{expected_summary}'",
                         "danger": True,
                         "requiredConfirm": expected_summary,
+                        "confirmToken": token,
                         "requestId": req_id,
                     },
                     status=428,
@@ -1043,7 +1217,14 @@ class AppHandler(BaseHTTPRequestHandler):
             return text
 
     def read_json(self):
-        length = int(self.headers.get("Content-Length", "0"))
+        length_str = self.headers.get("Content-Length", "0")
+        try:
+            length = int(length_str)
+        except ValueError as exc:
+            raise ValueError("Invalid Content-Length header") from exc
+
+        if length > MAX_REQUEST_BODY_BYTES:
+            raise ValueError(f"Request body exceeds maximum allowed size ({MAX_REQUEST_BODY_BYTES} bytes)")
         return parse_json_bytes(self.rfile.read(length))
 
     def serve_static(self, path):
@@ -1070,11 +1251,14 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if file_path.name == "index.html":
             html_text = data.decode("utf-8", errors="replace")
-            meta_tag = f'<meta name="csrf-token" content="{CSRF_TOKEN}">'
+            meta_tags = (
+                f'<meta name="csrf-token" content="{CSRF_TOKEN}">\n'
+                f'    <meta name="local-token" content="{LOCAL_AUTH_TOKEN}">'
+            )
             if '<meta name="csrf-token"' in html_text:
-                html_text = re.sub(r'<meta name="csrf-token"[^>]*>', meta_tag, html_text)
+                html_text = re.sub(r'<meta name="csrf-token"[^>]*>', meta_tags, html_text)
             else:
-                html_text = html_text.replace("</head>", f"    {meta_tag}\n  </head>")
+                html_text = html_text.replace("</head>", f"    {meta_tags}\n  </head>")
             data = html_text.encode("utf-8")
 
         self.send_response(200)
@@ -1086,6 +1270,10 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_header)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header(
+            "Set-Cookie",
+            f"local_token={LOCAL_AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
+        )
         for hdr, val in STATIC_SECURITY_HEADERS.items():
             self.send_header(hdr, val)
         self.end_headers()
@@ -1104,23 +1292,36 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    global READ_ONLY_MODE
     parser = argparse.ArgumentParser(description="OmniDimension Control Center")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--read-only", action="store_true", help="Run server in read-only mode")
     args = parser.parse_args()
+
+    if args.read_only:
+        READ_ONLY_MODE = True
 
     if args.host not in {"127.0.0.1", "localhost"}:
         print("\n" + "!" * 78)
         print(f"WARNING: Binding to non-local host '{args.host}'.")
-        print("THIS APPLICATION HAS NO USER AUTHENTICATION AND SHOULD ONLY BE RUN ON LOCALHOST!")
+        print("THIS APPLICATION IS INTENDED ONLY FOR LOCALHOST ACCESS!")
         print("!" * 78 + "\n")
 
     init_db()
+    secure_db_file()
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)
-    print(f"OmniDimension Control Center running at http://{args.host}:{args.port}")
-    print(f"Database: {DB_PATH}")
+    print("\n" + "=" * 78)
+    print("OmniDimension Control Center")
+    print(f"URL:              http://{args.host}:{args.port}")
+    print(f"Browser URL:      http://{args.host}:{args.port}/#token={LOCAL_AUTH_TOKEN}")
+    print(f"Local Auth Token: {LOCAL_AUTH_TOKEN}")
+    print(f"Mode:             {'READ-ONLY' if READ_ONLY_MODE else 'STANDARD'}")
+    print(f"Database:         {DB_PATH}")
+    print("=" * 78 + "\n")
     server.serve_forever()
 
 
 if __name__ == "__main__":
     main()
+

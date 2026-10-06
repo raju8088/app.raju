@@ -47,6 +47,7 @@ def test_allowlist_rejects_unregistered_paths(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
             "X-CSRF-Token": server.CSRF_TOKEN,
         },
     )
@@ -70,6 +71,7 @@ def test_danger_enforcement_returns_428_without_confirm(live_server):
         headers={
             "Host": f"127.0.0.1:{port}",
             "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
             "X-CSRF-Token": server.CSRF_TOKEN,
         },
     )
@@ -80,8 +82,77 @@ def test_danger_enforcement_returns_428_without_confirm(live_server):
     assert res.status == 428
     assert body["ok"] is False
     assert body["danger"] is True
-    assert "confirmation phrase" in body["error"]
+    assert "confirmation" in body["error"]
     assert body["requiredConfirm"] == "Dispatch call"
+    assert "confirmToken" in body
+
+
+def test_danger_single_use_token_accepted_and_consumed(live_server):
+    host_port, port = live_server
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+
+    # 1. First request triggers 428 and returns confirmToken
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps({"method": "POST", "path": "/calls/dispatch", "body": {}}).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res = conn.getresponse()
+    body = json.loads(res.read().decode())
+    assert res.status == 428
+    confirm_token = body["confirmToken"]
+
+    # 2. Second request uses token; fails with 400 (API key needed) not 428 (danger check passed!)
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps({
+            "method": "POST",
+            "path": "/calls/dispatch",
+            "body": {},
+            "confirmToken": confirm_token,
+        }).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res2 = conn.getresponse()
+    body2 = json.loads(res2.read().decode())
+    # Passed danger check, reached API key check
+    assert res2.status in (400, 200, 502)
+    assert res2.status != 428
+    assert "ok" in body2
+
+
+    # 3. Third request tries to reuse same token -> rejected with 428 (token already consumed!)
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps({
+            "method": "POST",
+            "path": "/calls/dispatch",
+            "body": {},
+            "confirmToken": confirm_token,
+        }).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res3 = conn.getresponse()
+    assert res3.status == 428
+    conn.close()
 
 
 def test_path_parameter_character_rejection():
