@@ -1,6 +1,7 @@
 import http.client
 import json
 import threading
+import urllib.parse
 from http.server import ThreadingHTTPServer
 
 import pytest
@@ -36,6 +37,42 @@ def test_host_header_rejection(live_server):
     assert body["ok"] is False
     assert "Host" in body["error"]
     assert "requestId" in body
+
+
+@pytest.mark.parametrize(
+    "rebinding_host",
+    [
+        "127.0.0.1.attacker.com",
+        "localhost.attacker.com",
+        "attacker.com:8787",
+        "127.0.0.1:8787@attacker.com",
+        "127.0.0.1.nip.io",
+        "127.0.0.1.xip.io",
+        "spoofed-127.0.0.1",
+        "localhost.evil.org:8787",
+        "evil-127.0.0.1:8787",
+        "subdomain.localhost.com",
+    ],
+)
+def test_dns_rebinding_host_header_rejected(live_server, rebinding_host):
+    host_port, port = live_server
+    # Test validator function directly
+    assert server.is_valid_host(rebinding_host) is False
+
+    # Test HTTP handler rejection
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+    conn.request(
+        "GET",
+        "/api/endpoints",
+        headers={"Host": rebinding_host, "X-Local-Token": server.LOCAL_AUTH_TOKEN},
+    )
+    res = conn.getresponse()
+    body = json.loads(res.read().decode())
+    conn.close()
+
+    assert res.status == 403
+    assert body["ok"] is False
+    assert "Host" in body["error"]
 
 
 def test_host_header_allowed(live_server):
@@ -390,3 +427,80 @@ def test_request_body_size_limit(live_server):
 
     assert res.status == 400
     assert "maximum allowed size" in body["error"]
+
+
+def test_request_history_redaction_secrets_not_persisted():
+    # Sensitive canaries that should NEVER appear in plaintext in request_history
+    canary_api_key = "canary-api-key-xyz-9876543210"
+    canary_password = "canary-password-secret-12345"
+    canary_auth_header = "Bearer canary-bearer-token-abcde"
+    canary_sip_secret = "canary-sip-secret-pass-999"
+    canary_token = "canary-jwt-token-abcdef123456"
+    canary_query_val = "canary-url-query-secret-555"
+
+    endpoint_test_id = f"test-redact-{server.uuid.uuid4().hex[:8]}"
+
+    req_payload = {
+        "api_key": canary_api_key,
+        "nested": {
+            "password": canary_password,
+            "sip_password": canary_sip_secret,
+            "safe_field": "keep-me-safe",
+        },
+        "items": [
+            {"token": canary_token, "name": "item-1"},
+        ],
+    }
+
+    res_payload = {
+        "status": "success",
+        "authorization": canary_auth_header,
+        "result": {"api_token": canary_token},
+    }
+
+    raw_url = f"https://api.omnidim.io/v1/test?api_key={canary_query_val}&safe_param=hello"
+
+    # Log to history
+    server.log_history(
+        endpoint_id_value=endpoint_test_id,
+        method="POST",
+        path="/v1/test",
+        url=raw_url,
+        status=200,
+        ok=True,
+        duration_ms=42,
+        request_payload=req_payload,
+        response_payload=res_payload,
+    )
+
+    # Query the SQLite request_history table directly
+    with server.get_db() as conn:
+        row = conn.execute(
+            "SELECT url, request_json, response_json FROM request_history WHERE endpoint_id = ?",
+            (endpoint_test_id,),
+        ).fetchone()
+
+    assert row is not None
+    saved_url = row["url"]
+    saved_req = row["request_json"]
+    saved_res = row["response_json"]
+    entire_record = f"{saved_url} {saved_req} {saved_res}"
+
+    # Verify that NONE of the sensitive canaries are present in the database record
+    all_canaries = [
+        canary_api_key,
+        canary_password,
+        canary_auth_header,
+        canary_sip_secret,
+        canary_token,
+        canary_query_val,
+    ]
+    for canary in all_canaries:
+        assert canary not in entire_record, f"Secret canary '{canary}' leaked into request_history table!"
+
+    # Verify that redactions were properly replaced with markers
+    assert "[REDACTED]" in urllib.parse.unquote(saved_url)
+    assert "[REDACTED]" in saved_req
+    assert "[REDACTED]" in saved_res
+    assert "keep-me-safe" in saved_req
+

@@ -1,6 +1,7 @@
 import http.client
 import json
 import threading
+import time
 from http.server import ThreadingHTTPServer
 
 import pytest
@@ -245,6 +246,125 @@ def test_danger_bypass_flags_rejected(live_server):
     res2 = conn.getresponse()
     conn.close()
     assert res2.status == 428
+
+
+def test_danger_token_reused_after_use(live_server):
+    host_port, port = live_server
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+
+    payload = {
+        "method": "POST",
+        "path": "/calls/dispatch",
+        "body": {"to_number": "+15550001111"},
+    }
+
+    # 1. First call without token generates token
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps(payload).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res = conn.getresponse()
+    body = json.loads(res.read().decode())
+    assert res.status == 428
+    token = body["confirmToken"]
+
+    # 2. First execution with token consumes it
+    payload_with_token = dict(payload)
+    payload_with_token["confirmToken"] = token
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps(payload_with_token).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res2 = conn.getresponse()
+    # It must not return 428 (danger check passed and token consumed)
+    assert res2.status in (200, 400, 502)
+
+    # 3. Second execution with the EXACT same token must fail with 428
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps(payload_with_token).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res3 = conn.getresponse()
+    body3 = json.loads(res3.read().decode())
+    conn.close()
+
+    assert res3.status == 428
+    assert "already-used" in body3["error"] or "already been used" in body3["error"]
+
+
+def test_danger_token_expired(live_server):
+    host_port, port = live_server
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+
+    payload = {
+        "method": "POST",
+        "path": "/calls/dispatch",
+        "body": {"to_number": "+15550002222"},
+    }
+
+    # 1. First call generates token
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps(payload).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res = conn.getresponse()
+    body = json.loads(res.read().decode())
+    assert res.status == 428
+    token = body["confirmToken"]
+
+    # 2. Fast forward token creation time past CONFIRMATION_TOKEN_TTL (60s)
+    created_at, ep_id, sig = server.CONFIRMATION_TOKENS[token]
+    server.CONFIRMATION_TOKENS[token] = (time.time() - 75, ep_id, sig)
+
+    # 3. Request with expired token should be rejected with 428
+    payload_with_token = dict(payload)
+    payload_with_token["confirmToken"] = token
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps(payload_with_token).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res2 = conn.getresponse()
+    body2 = json.loads(res2.read().decode())
+    conn.close()
+
+    assert res2.status == 428
+    assert "expired" in body2["error"].lower()
+
 
 
 
