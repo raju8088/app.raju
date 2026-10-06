@@ -10,6 +10,7 @@ import secrets
 import threading
 import time
 import urllib.parse
+from typing import Any
 
 from omnidim_ui.config import (
     CONFIRMATION_TOKEN_TTL,
@@ -25,56 +26,98 @@ except ImportError:
 
 IS_WINDOWS = platform.system() == "Windows"
 
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [
+        ("cbData", ctypes.c_ulong),
+        ("pbData", ctypes.POINTER(ctypes.c_byte)),
+    ]
+
+
+def setup_dpapi_signatures(crypt32: Any, kernel32: Any) -> None:
+    """Explicitly configure ctypes argtypes and restype for Windows DPAPI and memory APIs."""
+    crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_wchar_p,
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(_DATA_BLOB),
+    ]
+    crypt32.CryptProtectData.restype = ctypes.c_int
+
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.POINTER(ctypes.c_wchar_p),
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(_DATA_BLOB),
+    ]
+    crypt32.CryptUnprotectData.restype = ctypes.c_int
+
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+
 if IS_WINDOWS:
-    import ctypes.wintypes
+    setup_dpapi_signatures(ctypes.windll.crypt32, ctypes.windll.kernel32)
 
-    class _DATA_BLOB(ctypes.Structure):
-        _fields_ = [
-            ("cbData", ctypes.wintypes.DWORD),
-            ("pbData", ctypes.POINTER(ctypes.c_byte)),
-        ]
 
-    def dpapi_protect(text: str) -> str:
-        """Encrypt secret string using Windows DPAPI (tied to current user logon)."""
-        data = text.encode("utf-8")
-        in_blob = _DATA_BLOB(
-            len(data),
-            ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)),
-        )
-        out_blob = _DATA_BLOB()
-        if not ctypes.windll.crypt32.CryptProtectData(
+def dpapi_protect(text: str, crypt32: Any = None, kernel32: Any = None) -> str:
+    """Encrypt secret string using Windows DPAPI (tied to current user logon)."""
+    if crypt32 is None or kernel32 is None:
+        if not IS_WINDOWS:
+            raise NotImplementedError("Windows DPAPI is only available on Windows")
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+
+    data = text.encode("utf-8")
+    in_blob = _DATA_BLOB(
+        len(data),
+        ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)),
+    )
+    out_blob = _DATA_BLOB()
+    try:
+        if not crypt32.CryptProtectData(
             ctypes.byref(in_blob), "OmniDimension API Key", None, None, None, 0, ctypes.byref(out_blob)
         ):
             raise RuntimeError("Windows DPAPI CryptProtectData failed")
         encrypted_bytes = ctypes.string_at(out_blob.pbData, out_blob.cbData)
-        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
         return "dpapi:" + base64.b64encode(encrypted_bytes).decode("ascii")
+    finally:
+        if out_blob.pbData:
+            kernel32.LocalFree(out_blob.pbData)
 
-    def dpapi_unprotect(encrypted_str: str) -> str:
-        """Decrypt secret string using Windows DPAPI."""
-        if not encrypted_str.startswith("dpapi:"):
-            raise ValueError("Not a valid DPAPI payload")
-        raw = base64.b64decode(encrypted_str[6:])
-        in_blob = _DATA_BLOB(
-            len(raw),
-            ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)),
-        )
-        out_blob = _DATA_BLOB()
-        if not ctypes.windll.crypt32.CryptUnprotectData(
+
+def dpapi_unprotect(encrypted_str: str, crypt32: Any = None, kernel32: Any = None) -> str:
+    """Decrypt secret string using Windows DPAPI."""
+    if not encrypted_str.startswith("dpapi:"):
+        raise ValueError("Not a valid DPAPI payload")
+
+    if crypt32 is None or kernel32 is None:
+        if not IS_WINDOWS:
+            raise NotImplementedError("Windows DPAPI is only available on Windows")
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+
+    raw = base64.b64decode(encrypted_str[6:])
+    in_blob = _DATA_BLOB(
+        len(raw),
+        ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)),
+    )
+    out_blob = _DATA_BLOB()
+    try:
+        if not crypt32.CryptUnprotectData(
             ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)
         ):
             raise RuntimeError("Windows DPAPI CryptUnprotectData failed")
         decrypted_bytes = ctypes.string_at(out_blob.pbData, out_blob.cbData)
-        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
         return decrypted_bytes.decode("utf-8")
-
-else:
-
-    def dpapi_protect(text: str) -> str:
-        raise NotImplementedError("Windows DPAPI is only available on Windows")
-
-    def dpapi_unprotect(encrypted_str: str) -> str:
-        raise NotImplementedError("Windows DPAPI is only available on Windows")
+    finally:
+        if out_blob.pbData:
+            kernel32.LocalFree(out_blob.pbData)
 
 
 CSRF_TOKEN = secrets.token_hex(32)

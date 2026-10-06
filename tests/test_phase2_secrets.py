@@ -116,3 +116,64 @@ def test_history_auto_prune_limit():
     with server.get_db() as conn:
         count = conn.execute("SELECT COUNT(*) FROM request_history").fetchone()[0]
         assert count == server.HISTORY_RETENTION_LIMIT
+
+
+def test_dpapi_protect_and_unprotect_with_mocks():
+    import ctypes
+
+    from omnidim_ui.security import dpapi_protect, dpapi_unprotect, setup_dpapi_signatures
+
+    mock_crypt32 = mock.MagicMock()
+    mock_kernel32 = mock.MagicMock()
+
+    # Verify signature configuration
+    setup_dpapi_signatures(mock_crypt32, mock_kernel32)
+    assert len(mock_crypt32.CryptProtectData.argtypes) == 7
+    assert mock_crypt32.CryptProtectData.restype == ctypes.c_int
+    assert len(mock_crypt32.CryptUnprotectData.argtypes) == 7
+    assert mock_crypt32.CryptUnprotectData.restype == ctypes.c_int
+    assert mock_kernel32.LocalFree.argtypes == [ctypes.c_void_p]
+    assert mock_kernel32.LocalFree.restype == ctypes.c_void_p
+
+    # Test Protect Data with mock
+    fake_cipher_bytes = b"encrypted-blob-sample"
+    allocated_buf = ctypes.create_string_buffer(fake_cipher_bytes)
+
+    def fake_protect(pDataIn, szDataDescr, pEntropy, pReserved, pPrompt, dwFlags, pDataOut):
+        out_blob = pDataOut._obj
+        out_blob.cbData = len(fake_cipher_bytes)
+        out_blob.pbData = ctypes.cast(allocated_buf, ctypes.POINTER(ctypes.c_byte))
+        return 1
+
+    mock_crypt32.CryptProtectData.side_effect = fake_protect
+    res = dpapi_protect("test-secret", crypt32=mock_crypt32, kernel32=mock_kernel32)
+
+    assert res.startswith("dpapi:")
+    # Verify LocalFree called in finally block
+    mock_kernel32.LocalFree.assert_called_once()
+
+    # Test Unprotect Data with mock
+    mock_kernel32.reset_mock()
+    plain_bytes = b"test-secret"
+    plain_buf = ctypes.create_string_buffer(plain_bytes)
+
+    def fake_unprotect(pDataIn, ppszDescr, pEntropy, pReserved, pPrompt, dwFlags, pDataOut):
+        out_blob = pDataOut._obj
+        out_blob.cbData = len(plain_bytes)
+        out_blob.pbData = ctypes.cast(plain_buf, ctypes.POINTER(ctypes.c_byte))
+        return 1
+
+    mock_crypt32.CryptUnprotectData.side_effect = fake_unprotect
+    decrypted = dpapi_unprotect(res, crypt32=mock_crypt32, kernel32=mock_kernel32)
+
+    assert decrypted == "test-secret"
+    # Verify LocalFree called in finally block
+    mock_kernel32.LocalFree.assert_called_once()
+
+    # Test failure handling
+    mock_crypt32.CryptProtectData.side_effect = None
+    mock_crypt32.CryptProtectData.return_value = 0
+    import pytest
+    with pytest.raises(RuntimeError, match="CryptProtectData failed"):
+        dpapi_protect("secret", crypt32=mock_crypt32, kernel32=mock_kernel32)
+
