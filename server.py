@@ -733,25 +733,39 @@ def migrate_legacy_enc_v1():
 
 
 
-def issue_confirm_token(endpoint_id: str) -> str:
-    """Issue a single-use confirmation token for a dangerous action."""
+def compute_danger_signature(method: str, path: str, query: dict, body: object) -> str:
+    """Compute deterministic SHA-256 hash of method, path, query, and body."""
+    canon_query = json.dumps(query or {}, sort_keys=True, separators=(",", ":"))
+    canon_body = json.dumps(body if body is not None else {}, sort_keys=True, separators=(",", ":"))
+    raw = f"{method.upper()}|{path}|{canon_query}|{canon_body}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def issue_confirm_token(endpoint_id: str, signature: str) -> str:
+    """Issue a single-use 60s confirmation token cryptographically bound to the request signature."""
     now = time.time()
-    expired = [k for k, (ts, _) in CONFIRMATION_TOKENS.items() if now - ts > CONFIRMATION_TOKEN_TTL]
+    expired = [k for k, (ts, _, _) in CONFIRMATION_TOKENS.items() if now - ts > CONFIRMATION_TOKEN_TTL]
     for k in expired:
         CONFIRMATION_TOKENS.pop(k, None)
     token = secrets.token_hex(16)
-    CONFIRMATION_TOKENS[token] = (now, endpoint_id)
+    CONFIRMATION_TOKENS[token] = (now, endpoint_id, signature)
     return token
 
 
-def consume_confirm_token(token: str, endpoint_id: str) -> bool:
-    """Validate and consume a single-use confirmation token."""
+def consume_confirm_token(token: str, endpoint_id: str, signature: str) -> tuple[bool, str]:
+    """Validate and consume a single-use confirmation token bound to request signature."""
     now = time.time()
-    if token in CONFIRMATION_TOKENS:
-        ts, ep_id = CONFIRMATION_TOKENS.pop(token)
-        if now - ts <= CONFIRMATION_TOKEN_TTL and ep_id == endpoint_id:
-            return True
-    return False
+    if token not in CONFIRMATION_TOKENS:
+        return False, "Invalid, expired, or already-used confirmation token"
+    ts, ep_id, stored_sig = CONFIRMATION_TOKENS.pop(token)
+    if now - ts > CONFIRMATION_TOKEN_TTL:
+        return False, "Confirmation token has expired (60s lifetime exceeded)"
+    if ep_id != endpoint_id:
+        return False, "Confirmation token was issued for a different endpoint"
+    if not hmac.compare_digest(stored_sig, signature):
+        return False, "Request parameters or body were modified after confirmation token was issued"
+    return True, "ok"
+
 
 
 def get_api_key():
@@ -1174,7 +1188,6 @@ class AppHandler(BaseHTTPRequestHandler):
         path = data.get("path", "")
         query = data.get("query") or {}
         body = data.get("body", None)
-        confirm = data.get("confirm", "").strip()
 
         if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
             raise ValueError("Unsupported HTTP method")
@@ -1200,24 +1213,18 @@ class AppHandler(BaseHTTPRequestHandler):
 
         endpoint_id_value = data.get("endpointId", matched_endpoint["id"])
 
-        # 2. Server-side enforcement of danger flag
+        # 2. Server-side enforcement of danger flag (requires single-use 60s token bound to payload signature)
         if matched_endpoint.get("danger"):
             expected_summary = matched_endpoint["summary"].strip()
-            is_confirmed = False
             confirm_token = data.get("confirmToken", "").strip()
-            if confirm_token and consume_confirm_token(confirm_token, matched_endpoint["id"]):
-                is_confirmed = True
-            elif data.get("confirmed") is True:
-                is_confirmed = True
-            elif confirm == expected_summary:
-                is_confirmed = True
+            signature = compute_danger_signature(method, path, query, body)
 
-            if not is_confirmed:
-                token = issue_confirm_token(matched_endpoint["id"])
+            if not confirm_token:
+                token = issue_confirm_token(matched_endpoint["id"], signature)
                 self.send_json(
                     {
                         "ok": False,
-                        "error": f"Dangerous action requires explicit confirmation for '{expected_summary}'",
+                        "error": "Dangerous action requires confirmation with single-use token",
                         "danger": True,
                         "requiredConfirm": expected_summary,
                         "confirmToken": token,
@@ -1226,6 +1233,23 @@ class AppHandler(BaseHTTPRequestHandler):
                     status=428,
                 )
                 return
+
+            valid, err_msg = consume_confirm_token(confirm_token, matched_endpoint["id"], signature)
+            if not valid:
+                new_token = issue_confirm_token(matched_endpoint["id"], signature)
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": f"Dangerous action confirmation rejected: {err_msg}",
+                        "danger": True,
+                        "requiredConfirm": expected_summary,
+                        "confirmToken": new_token,
+                        "requestId": req_id,
+                    },
+                    status=428,
+                )
+                return
+
 
         settings = read_settings(include_secret=True)
         api_key = settings.get("apiKey", "")

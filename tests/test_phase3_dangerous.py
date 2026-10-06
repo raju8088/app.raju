@@ -155,6 +155,99 @@ def test_danger_single_use_token_accepted_and_consumed(live_server):
     conn.close()
 
 
+def test_danger_tampered_body_fails(live_server):
+    host_port, port = live_server
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+
+    # 1. Request token for initial body
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps({"method": "POST", "path": "/calls/dispatch", "body": {"to_number": "+15551234567"}}).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res = conn.getresponse()
+    body = json.loads(res.read().decode())
+    assert res.status == 428
+    token = body["confirmToken"]
+
+    # 2. Try to submit with tampered body
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps({
+            "method": "POST",
+            "path": "/calls/dispatch",
+            "body": {"to_number": "+15559999999"},  # Altered number!
+            "confirmToken": token,
+        }).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res2 = conn.getresponse()
+    body2 = json.loads(res2.read().decode())
+    conn.close()
+
+    assert res2.status == 428
+    assert "modified after confirmation token was issued" in body2["error"]
+
+
+def test_danger_bypass_flags_rejected(live_server):
+    host_port, port = live_server
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+
+    # 1. confirmed: true without token
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps({
+            "method": "POST",
+            "path": "/calls/dispatch",
+            "body": {},
+            "confirmed": True,
+        }).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res = conn.getresponse()
+    assert res.status == 428
+
+    # 2. confirm phrase without token
+    conn.request(
+        "POST",
+        "/api/run",
+        body=json.dumps({
+            "method": "POST",
+            "path": "/calls/dispatch",
+            "body": {},
+            "confirm": "Dispatch call",
+        }).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Local-Token": server.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": server.CSRF_TOKEN,
+        },
+    )
+    res2 = conn.getresponse()
+    conn.close()
+    assert res2.status == 428
+
+
+
 def test_path_parameter_character_rejection():
     # Attempt path traversal in path parameter
     with pytest.raises(ValueError, match="illegal characters"):

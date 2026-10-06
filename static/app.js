@@ -497,14 +497,28 @@ async function runEndpoint(endpoint) {
     const payload = readRunnerPayload(endpoint);
 
     if (endpoint.danger) {
-      const confirmation = await promptDangerousConfirmation(endpoint, payload);
-      if (!confirmation) {
-        showToast("Action cancelled.");
-        return;
+      const preflight = await fetch("/api/run", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(state.localToken ? { "X-Local-Token": state.localToken } : {}),
+          ...(state.csrfToken ? { "X-CSRF-Token": state.csrfToken } : {})
+        },
+        body: JSON.stringify(payload)
+      });
+      const preflightData = await preflight.json().catch(() => ({}));
+      if (preflight.status === 428 && preflightData.confirmToken) {
+        payload.confirmToken = preflightData.confirmToken;
+        const confirmation = await promptDangerousConfirmation(endpoint, payload);
+        if (!confirmation) {
+          showToast("Action cancelled.");
+          return;
+        }
+      } else if (!preflight.ok) {
+        throw new Error(preflightData.error || `Precondition check failed with ${preflight.status}`);
       }
-      payload.confirm = confirmation;
-      payload.confirmed = true;
     }
+
 
 
     const meta = document.getElementById("responseMeta");
