@@ -7,6 +7,7 @@ import os
 import platform
 import re
 import secrets
+import threading
 import time
 import urllib.parse
 
@@ -152,30 +153,73 @@ def compute_danger_signature(method: str, path: str, query: dict, body: object) 
     return hashlib.sha256(raw).hexdigest()
 
 
-def issue_confirm_token(endpoint_id: str, signature: str) -> str:
-    """Issue a single-use 60s confirmation token cryptographically bound to the request signature."""
+TOKEN_LOCK = threading.Lock()
+
+
+def purge_expired_confirmation_tokens(now: float | None = None) -> int:
+    """Purge all expired tokens from the confirmation store (thread-safe)."""
+    current_time = time.time() if now is None else now
+    with TOKEN_LOCK:
+        expired = [
+            k
+            for k, entry in list(CONFIRMATION_TOKENS.items())
+            if current_time - entry[0] > CONFIRMATION_TOKEN_TTL
+        ]
+        for k in expired:
+            CONFIRMATION_TOKENS.pop(k, None)
+        return len(expired)
+
+
+def issue_confirm_token(endpoint_id: str, signature: str, session_id: str = "") -> str:
+    """Issue a single-use 60s confirmation token cryptographically bound to request signature and session."""
     now = time.time()
-    expired = [k for k, (ts, _, _) in CONFIRMATION_TOKENS.items() if now - ts > CONFIRMATION_TOKEN_TTL]
-    for k in expired:
-        CONFIRMATION_TOKENS.pop(k, None)
     token = secrets.token_hex(16)
-    CONFIRMATION_TOKENS[token] = (now, endpoint_id, signature)
+    with TOKEN_LOCK:
+        # Purge expired tokens on every access
+        expired = [
+            k
+            for k, entry in list(CONFIRMATION_TOKENS.items())
+            if now - entry[0] > CONFIRMATION_TOKEN_TTL
+        ]
+        for k in expired:
+            CONFIRMATION_TOKENS.pop(k, None)
+        CONFIRMATION_TOKENS[token] = (now, endpoint_id, signature, session_id)
     return token
 
 
-def consume_confirm_token(token: str, endpoint_id: str, signature: str) -> tuple[bool, str]:
-    """Validate and consume a single-use confirmation token bound to request signature."""
+def consume_confirm_token(
+    token: str, endpoint_id: str, signature: str, session_id: str = ""
+) -> tuple[bool, str]:
+    """Validate and atomically consume a single-use confirmation token bound to request signature and session."""
     now = time.time()
-    if token not in CONFIRMATION_TOKENS:
-        return False, "Invalid, expired, or already-used confirmation token"
-    ts, ep_id, stored_sig = CONFIRMATION_TOKENS.pop(token)
-    if now - ts > CONFIRMATION_TOKEN_TTL:
-        return False, "Confirmation token has expired (60s lifetime exceeded)"
-    if ep_id != endpoint_id:
-        return False, "Confirmation token was issued for a different endpoint"
-    if not hmac.compare_digest(stored_sig, signature):
-        return False, "Request parameters or body were modified after confirmation token was issued"
-    return True, "ok"
+    with TOKEN_LOCK:
+        # Purge expired tokens on every access
+        expired = [
+            k
+            for k, entry in list(CONFIRMATION_TOKENS.items())
+            if now - entry[0] > CONFIRMATION_TOKEN_TTL
+        ]
+        for k in expired:
+            CONFIRMATION_TOKENS.pop(k, None)
+
+        if token not in CONFIRMATION_TOKENS:
+            return False, "Invalid, expired, or already-used confirmation token"
+
+        entry = CONFIRMATION_TOKENS.pop(token)
+        ts = entry[0]
+        ep_id = entry[1]
+        stored_sig = entry[2]
+        stored_sess = entry[3] if len(entry) > 3 else ""
+
+        if now - ts > CONFIRMATION_TOKEN_TTL:
+            return False, "Confirmation token has expired (60s lifetime exceeded)"
+        if ep_id != endpoint_id:
+            return False, "Confirmation token was issued for a different endpoint"
+        if stored_sess and session_id and not hmac.compare_digest(stored_sess, session_id):
+            return False, "Confirmation token was issued for a different local session"
+        if not hmac.compare_digest(stored_sig, signature):
+            return False, "Request parameters or body were modified after confirmation token was issued"
+        return True, "ok"
 
 
 def secure_db_file(db_path=None):

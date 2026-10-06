@@ -341,8 +341,9 @@ def test_danger_token_expired(live_server):
     token = body["confirmToken"]
 
     # 2. Fast forward token creation time past CONFIRMATION_TOKEN_TTL (60s)
-    created_at, ep_id, sig = server.CONFIRMATION_TOKENS[token]
-    server.CONFIRMATION_TOKENS[token] = (time.time() - 75, ep_id, sig)
+    created_at, ep_id, sig, *rest = server.CONFIRMATION_TOKENS[token]
+    sess = rest[0] if rest else ""
+    server.CONFIRMATION_TOKENS[token] = (time.time() - 75, ep_id, sig, sess)
 
     # 3. Request with expired token should be rejected with 428
     payload_with_token = dict(payload)
@@ -394,3 +395,65 @@ def test_path_parameter_matching_valid():
     assert ep_multi["path"] == "/agents/{agent_id}/versions/{version_number}"
     assert params_multi["agent_id"] == "42"
     assert params_multi["version_number"] == "3"
+
+
+def test_confirmation_token_concurrent_consumption():
+    sig = server.compute_danger_signature("POST", "/calls/dispatch", {}, {"num": 1})
+    token = server.issue_confirm_token("post-calls-dispatch", sig, session_id="test-session")
+
+    results = []
+    barrier = threading.Barrier(20)
+
+    def worker():
+        barrier.wait()
+        res = server.consume_confirm_token(token, "post-calls-dispatch", sig, session_id="test-session")
+        results.append(res)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Exactly 1 thread must succeed; 19 must fail
+    successes = [r for r in results if r[0] is True]
+    failures = [r for r in results if r[0] is False]
+    assert len(successes) == 1
+    assert len(failures) == 19
+    assert all("Invalid, expired, or already-used" in f[1] for f in failures)
+
+
+def test_confirmation_token_purged_on_access():
+    old_token = "expired-token-canary-12345"
+    with server.security.TOKEN_LOCK:
+        server.CONFIRMATION_TOKENS[old_token] = (
+            time.time() - 120,
+            "ep-test",
+            "dummy-sig",
+            "dummy-session",
+        )
+
+    # Issue a new token - this triggers access and purge
+    new_sig = server.compute_danger_signature("POST", "/calls/dispatch", {}, {})
+    new_token = server.issue_confirm_token("ep-test", new_sig, session_id="sess")
+
+    # Verify expired token was purged from dictionary
+    assert old_token not in server.CONFIRMATION_TOKENS
+    assert new_token in server.CONFIRMATION_TOKENS
+
+
+def test_confirmation_token_session_binding():
+    sig = server.compute_danger_signature("POST", "/calls/dispatch", {}, {})
+
+    # 1. Token issued for Alice is rejected when presented by Bob's session
+    token_alice = server.issue_confirm_token("ep-test", sig, session_id="session-user-alice")
+    ok_bob, msg_bob = server.consume_confirm_token(token_alice, "ep-test", sig, session_id="session-user-bob")
+    assert ok_bob is False
+    assert "different local session" in msg_bob
+
+    # 2. Token issued for Alice is accepted when presented by Alice's session
+    token_valid = server.issue_confirm_token("ep-test", sig, session_id="session-user-alice")
+    ok_alice, msg_alice = server.consume_confirm_token(token_valid, "ep-test", sig, session_id="session-user-alice")
+    assert ok_alice is True
+    assert msg_alice == "ok"
+

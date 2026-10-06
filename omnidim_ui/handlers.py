@@ -97,6 +97,18 @@ class AppHandler(BaseHTTPRequestHandler):
                         return True
         return False
 
+    def get_auth_session(self) -> str:
+        token_hdr = self.headers.get("X-Local-Token", "").strip()
+        if token_hdr:
+            return token_hdr
+        cookie_hdr = self.headers.get("Cookie", "")
+        if cookie_hdr:
+            for item in cookie_hdr.split(";"):
+                parts = item.strip().split("=", 1)
+                if len(parts) == 2 and parts[0].strip() == "local_token":
+                    return parts[1].strip()
+        return LOCAL_AUTH_TOKEN
+
     def route(self):
         req_id = uuid.uuid4().hex[:12]
         parsed = urllib.parse.urlparse(self.path)
@@ -338,9 +350,10 @@ class AppHandler(BaseHTTPRequestHandler):
         if matched_endpoint.get("danger"):
             sig = compute_danger_signature(method, path, query, body)
             confirm_token = str(data.get("confirmToken") or "").strip()
+            session_id = self.get_auth_session()
 
             if not confirm_token:
-                issued_token = issue_confirm_token(endpoint_id_value, sig)
+                issued_token = issue_confirm_token(endpoint_id_value, sig, session_id=session_id)
                 self.send_json(
                     {
                         "ok": False,
@@ -359,9 +372,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
                 return
 
-            token_ok, token_msg = consume_confirm_token(confirm_token, endpoint_id_value, sig)
+            token_ok, token_msg = consume_confirm_token(confirm_token, endpoint_id_value, sig, session_id=session_id)
             if not token_ok:
-                new_token = issue_confirm_token(endpoint_id_value, sig)
+                new_token = issue_confirm_token(endpoint_id_value, sig, session_id=session_id)
                 self.send_json(
                     {
                         "ok": False,

@@ -59,6 +59,7 @@ from omnidim_ui import (
     save_api_key,
     save_setting,
     secure_db_file,
+    security,
     setup_logging,
     template_to_regex,
 )
@@ -66,6 +67,7 @@ from omnidim_ui.__main__ import main
 from omnidim_ui.security import IS_WINDOWS
 
 __all__ = [
+    "security",
     "AppHandler",
     "BASE_DIR",
     "CONFIRMATION_TOKENS",
