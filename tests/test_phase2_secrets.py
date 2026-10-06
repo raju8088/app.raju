@@ -98,24 +98,29 @@ def test_history_logging_redaction_and_retention():
 
 def test_history_auto_prune_limit():
     omnidim_ui.init_db()
+    # Test with custom configured limit of 50
+    omnidim_ui.save_setting("history_retention_limit", "50")
     with omnidim_ui.get_db() as conn:
         conn.execute("DELETE FROM request_history")
-        # Insert 505 rows directly
+        # Insert 55 rows directly
         conn.executemany(
             """
             INSERT INTO request_history
             (endpoint_id, method, path, url, status, ok, duration_ms, request_json, response_json, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [("ep", "GET", "/", "/", 200, 1, 1, "{}", "{}", "2026-01-01T00:00:00Z") for _ in range(505)],
+            [("ep", "GET", "/", "/", 200, 1, 1, "{}", "{}", "2026-01-01T00:00:00Z") for _ in range(55)],
         )
 
-    # Calling log_history should prune to retention limit (500)
+    # Calling log_history should prune to configured retention limit (50)
     omnidim_ui.log_history("ep", "GET", "/", "/", 200, True, 1, {}, {})
 
     with omnidim_ui.get_db() as conn:
         count = conn.execute("SELECT COUNT(*) FROM request_history").fetchone()[0]
-        assert count == omnidim_ui.HISTORY_RETENTION_LIMIT
+        assert count == 50
+
+    # Clean up setting
+    omnidim_ui.delete_setting("history_retention_limit")
 
 
 def test_dpapi_protect_and_unprotect_with_mocks():

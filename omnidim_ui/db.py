@@ -184,13 +184,20 @@ def read_settings(include_secret: bool = False, db_conn=None) -> dict[str, Any]:
     elif "server" in sys.modules and getattr(sys.modules["server"], "READ_ONLY_MODE", False):
         read_only = True
 
+    retention_limit = HISTORY_RETENTION_LIMIT
+    if "history_retention_limit" in raw:
+        try:
+            retention_limit = int(raw["history_retention_limit"])
+        except (ValueError, TypeError):
+            pass
+
     data = {
         "baseUrl": raw.get("base_url", DEFAULT_BASE_URL),
         "hasApiKey": bool(api_key),
         "apiKeySource": source,
         "apiKeyPreview": f"...{api_key[-4:]}" if api_key else "",
         "securityNotice": notice,
-        "retentionLimit": HISTORY_RETENTION_LIMIT,
+        "retentionLimit": retention_limit,
         "readOnly": read_only,
     }
     if include_secret:
@@ -234,6 +241,15 @@ def log_history(
                 now_iso(),
             ),
         )
+        # Determine effective retention limit: configured setting or default (5,000)
+        retention_limit = HISTORY_RETENTION_LIMIT
+        limit_row = conn.execute("SELECT value FROM settings WHERE key = 'history_retention_limit'").fetchone()
+        if limit_row and limit_row["value"]:
+            try:
+                retention_limit = int(limit_row["value"])
+            except (ValueError, TypeError):
+                pass
+
         # Auto-prune beyond retention limit
         conn.execute(
             """
@@ -242,7 +258,7 @@ def log_history(
                 SELECT id FROM request_history ORDER BY id DESC LIMIT ?
             )
             """,
-            (HISTORY_RETENTION_LIMIT,),
+            (retention_limit,),
         )
 
     if db_conn is not None:

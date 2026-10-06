@@ -78,6 +78,7 @@ function cacheRefs() {
     "searchInput",
     "baseUrlInput",
     "apiKeyInput",
+    "retentionLimitInput",
     "saveSettingsBtn",
     "clearKeyBtn",
     "connectionDot",
@@ -166,6 +167,9 @@ async function loadSettings() {
     : "Paste key to save";
   if (refs.readOnlyBadge) {
     refs.readOnlyBadge.hidden = !state.settings.readOnly;
+  }
+  if (refs.retentionLimitInput) {
+    refs.retentionLimitInput.value = state.settings.retentionLimit || 5000;
   }
 }
 
@@ -655,9 +659,17 @@ async function saveSettings() {
   try {
     const baseUrl = refs.baseUrlInput.value.trim();
     const apiKey = refs.apiKeyInput.value.trim();
+    const retentionLimit = parseInt(refs.retentionLimitInput?.value, 10);
+    const bodyObj = { baseUrl };
+    if (apiKey) {
+      bodyObj.apiKey = apiKey;
+    }
+    if (!Number.isNaN(retentionLimit)) {
+      bodyObj.retentionLimit = retentionLimit;
+    }
     state.settings = await api("/api/settings", {
       method: "PUT",
-      body: JSON.stringify({ baseUrl, apiKey })
+      body: JSON.stringify(bodyObj)
     });
     await loadSettings();
     renderSettingsState();

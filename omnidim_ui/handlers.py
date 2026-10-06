@@ -151,7 +151,9 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
 
                 # 4. Mutating requests validation (POST, PUT, PATCH, DELETE)
-                if self.command in {"POST", "PUT", "PATCH", "DELETE"}:
+                if self.command in {"POST", "PUT", "PATCH"} or (
+                    self.command == "DELETE" and int(self.headers.get("Content-Length", 0) or 0) > 0
+                ):
                     content_type = self.headers.get("Content-Type", "")
                     if not content_type.lower().startswith("application/json"):
                         self.send_json(
@@ -217,12 +219,21 @@ class AppHandler(BaseHTTPRequestHandler):
                 data = self.read_json()
                 base_url = data.get("baseUrl", "").strip()
                 api_key = data.get("apiKey", "").strip()
+                retention_limit = data.get("retentionLimit")
                 if base_url:
                     if not base_url.startswith("https://"):
                         raise ValueError("Base URL must start with https://")
                     save_setting("base_url", base_url.rstrip("/"))
                 if api_key:
                     save_api_key(api_key)
+                if retention_limit is not None:
+                    try:
+                        ret_int = int(retention_limit)
+                        if ret_int < 10 or ret_int > 50000:
+                            raise ValueError("Retention limit must be between 10 and 50,000")
+                        save_setting("history_retention_limit", str(ret_int))
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(f"Invalid retention limit: {exc}") from exc
                 self.send_json(read_settings())
                 return
             if self.command == "DELETE":

@@ -140,6 +140,9 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         MockUpstreamHandler.post_request_count += 1
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length > 0:
+            self.rfile.read(length)
         self.send_response(500)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -207,3 +210,97 @@ def test_openapi_catalog_drift_100_percent():
     assert report["totalCatalogOperations"] == 72
     assert len(report["unlistedInOpenAPI"]) == 0
     assert len(report["unimplementedInCatalog"]) == 0
+
+
+def test_history_retention_setting_and_clear_api(live_server):
+    host_port, port = live_server
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+
+    # 1. Default retention limit is 5000
+    conn.request(
+        "GET",
+        "/api/settings",
+        headers={"Host": f"127.0.0.1:{port}", "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN},
+    )
+    res = conn.getresponse()
+    body = json.loads(res.read().decode())
+    assert body["retentionLimit"] == 5000
+
+    # 2. Update retention limit via /api/settings
+    conn.request(
+        "POST",
+        "/api/settings",
+        body=json.dumps({"retentionLimit": 25}).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "Origin": f"http://127.0.0.1:{port}",
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
+        },
+    )
+    res = conn.getresponse()
+    body = json.loads(res.read().decode())
+    assert res.status == 200
+    assert body["retentionLimit"] == 25
+
+    # 3. Insert 30 items directly, then log_history should prune to 25
+    with omnidim_ui.get_db() as db_conn:
+        db_conn.execute("DELETE FROM request_history")
+        for i in range(30):
+            db_conn.execute(
+                """
+                INSERT INTO request_history
+                (endpoint_id, method, path, url, status, ok, duration_ms, request_json, response_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (f"ep-{i}", "GET", f"/path/{i}", "https://api.omnidim.io/v1", 200, 1, 10, "{}", "{}", "2026-01-01T00:00:00Z"),
+            )
+
+    omnidim_ui.log_history("ep-new", "GET", "/new", "https://api.omnidim.io/v1/new", 200, True, 5, {}, {})
+    with omnidim_ui.get_db() as db_conn:
+        count = db_conn.execute("SELECT COUNT(*) FROM request_history").fetchone()[0]
+        assert count == 25
+
+    # 4. Rejection of invalid limits (< 10 or > 50,000)
+    conn.request(
+        "POST",
+        "/api/settings",
+        body=json.dumps({"retentionLimit": 5}).encode(),
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "Origin": f"http://127.0.0.1:{port}",
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
+        },
+    )
+    res = conn.getresponse()
+    err_body = json.loads(res.read().decode())
+    assert res.status == 400
+    assert "between 10 and 50,000" in err_body["error"]
+
+    # 5. Clear history via DELETE /api/history
+    conn.request(
+        "DELETE",
+        "/api/history",
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Origin": f"http://127.0.0.1:{port}",
+            "X-Local-Token": omnidim_ui.LOCAL_AUTH_TOKEN,
+            "X-CSRF-Token": omnidim_ui.CSRF_TOKEN,
+        },
+    )
+    res = conn.getresponse()
+    clear_body = json.loads(res.read().decode())
+    assert res.status == 200
+    assert clear_body["ok"] is True
+
+    with omnidim_ui.get_db() as db_conn:
+        remaining = db_conn.execute("SELECT COUNT(*) FROM request_history").fetchone()[0]
+        assert remaining == 0
+
+    # 6. Reset retention limit back to default
+    omnidim_ui.delete_setting("history_retention_limit")
+    conn.close()
+
