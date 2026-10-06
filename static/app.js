@@ -5,6 +5,11 @@ const state = {
   activeGroup: "Sessions",
   selectedEndpointId: null,
   history: [],
+  historyPage: 1,
+  historyLimit: 25,
+  historySearch: "",
+  historyTotal: 0,
+  historyTotalPages: 1,
   savedPayloads: [],
   view: "endpoints",
   lastResponse: null,
@@ -86,6 +91,10 @@ function cacheRefs() {
     "historyView",
     "databaseView",
     "historyRows",
+    "historySearchInput",
+    "historyPrevBtn",
+    "historyNextBtn",
+    "historyPageInfo",
     "savedPayloadList",
     "clearHistoryBtn",
     "readOnlyBadge",
@@ -100,6 +109,20 @@ function bindStaticEvents() {
   refs.saveSettingsBtn.addEventListener("click", saveSettings);
   refs.clearKeyBtn.addEventListener("click", clearApiKey);
   refs.clearHistoryBtn.addEventListener("click", clearHistory);
+  refs.historySearchInput?.addEventListener("input", (e) => {
+    state.historySearch = e.target.value.trim();
+    loadHistory(1);
+  });
+  refs.historyPrevBtn?.addEventListener("click", () => {
+    if (state.historyPage > 1) {
+      loadHistory(state.historyPage - 1);
+    }
+  });
+  refs.historyNextBtn?.addEventListener("click", () => {
+    if (state.historyPage < state.historyTotalPages) {
+      loadHistory(state.historyPage + 1);
+    }
+  });
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => setView(button.dataset.view));
   });
@@ -147,9 +170,26 @@ async function loadSettings() {
 }
 
 
-async function loadHistory() {
-  const data = await api("/api/history?limit=100");
-  state.history = data.records || [];
+async function loadHistory(page = 1) {
+  state.historyPage = page;
+  const q = new URLSearchParams({
+    page: String(state.historyPage),
+    limit: String(state.historyLimit || 25),
+  });
+  if (state.historySearch) {
+    q.set("search", state.historySearch);
+  }
+  try {
+    const data = await api(`/api/history?${q.toString()}`);
+    state.history = data.items || data.records || [];
+    state.historyTotal = data.total ?? state.history.length;
+    state.historyTotalPages = data.totalPages || 1;
+  } catch (error) {
+    state.history = [];
+    state.historyTotal = 0;
+    state.historyTotalPages = 1;
+  }
+  renderHistory();
 }
 
 async function loadSavedPayloads() {
@@ -651,7 +691,17 @@ async function clearHistory() {
 function renderHistory() {
   refs.historyRows.innerHTML = state.history.length
     ? state.history.map(historyRowHtml).join("")
-    : `<tr><td colspan="5">No requests sent yet.</td></tr>`;
+    : `<tr><td colspan="5">No requests match criteria.</td></tr>`;
+
+  if (refs.historyPageInfo) {
+    refs.historyPageInfo.textContent = `Page ${state.historyPage} of ${state.historyTotalPages} (${state.historyTotal} total)`;
+  }
+  if (refs.historyPrevBtn) {
+    refs.historyPrevBtn.disabled = state.historyPage <= 1;
+  }
+  if (refs.historyNextBtn) {
+    refs.historyNextBtn.disabled = state.historyPage >= state.historyTotalPages;
+  }
 }
 
 function historyRowHtml(row) {

@@ -112,7 +112,10 @@
               <h2>Request history</h2>
               <p>Every request sent through the private proxy is recorded locally.</p>
             </div>
-            <button id="clearHistoryBtn" class="button danger" type="button">Clear history</button>
+            <div class="inline-actions" style="display: flex; gap: 0.5rem; align-items: center;">
+              <input id="historySearchInput" type="search" placeholder="Filter history..." style="padding: 0.4rem 0.6rem; border-radius: 4px; border: 1px solid var(--border-color, #ccc); background: transparent; color: inherit; font-size: 0.85rem;">
+              <button id="clearHistoryBtn" class="button danger" type="button">Clear history</button>
+            </div>
           </div>
           <div class="table-wrap">
             <table class="data-table">
@@ -127,6 +130,11 @@
               </thead>
               <tbody id="historyRows"></tbody>
             </table>
+          </div>
+          <div class="pagination-bar" id="historyPagination" style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0.5rem; font-size: 0.85rem;">
+            <button id="historyPrevBtn" class="button" type="button" disabled>Previous</button>
+            <span id="historyPageInfo">Page 1 of 1</span>
+            <button id="historyNextBtn" class="button" type="button" disabled>Next</button>
           </div>
         </section>
 
