@@ -113,7 +113,7 @@ def format_drift_report(report: dict[str, Any]) -> str:
 def main() -> None:
     report = check_catalog_drift()
     print(format_drift_report(report))
-    if report["unlistedInOpenAPI"]:
+    if report["unlistedInOpenAPI"] or report["unimplementedInCatalog"]:
         sys.exit(1)
     sys.exit(0)
 

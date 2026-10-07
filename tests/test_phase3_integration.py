@@ -13,7 +13,7 @@ import omnidim_ui
 from tests.mock_upstream import StubUpstreamServer
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def stub_upstream():
     server = StubUpstreamServer()
     base_url = server.start()
@@ -21,8 +21,12 @@ def stub_upstream():
     server.stop()
 
 
-@pytest.fixture(scope="module")
-def integration_app(stub_upstream):
+@pytest.fixture
+def integration_app(stub_upstream, monkeypatch):
+    from functools import partial
+
+    from omnidim_ui import handlers, proxy
+    monkeypatch.setattr(handlers, "execute_proxy_request", partial(proxy.execute_proxy_request, url_validator=lambda url: url))
     omnidim_ui.init_db()
     # Configure base URL and API key
     omnidim_ui.save_setting("base_url", f"{stub_upstream}/v1")
@@ -292,7 +296,7 @@ def test_proxy_upstream_error_codes(integration_app):
     )
     res = conn.getresponse()
     body = json.loads(res.read().decode("utf-8"))
-    assert res.status == 200
+    assert res.status == 404
     assert body["status"] == 404
     assert body["ok"] is False
 
@@ -310,7 +314,7 @@ def test_proxy_upstream_error_codes(integration_app):
     )
     res2 = conn.getresponse()
     body2 = json.loads(res2.read().decode("utf-8"))
-    assert res2.status == 200
+    assert res2.status == 429
     assert body2["status"] == 429
     assert body2["ok"] is False
     assert "Rate limit" in body2["data"]["error"]

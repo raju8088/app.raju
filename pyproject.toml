@@ -1,11 +1,23 @@
 [project]
 name = "omnidim-control-center"
 version = "1.0.0"
-description = "Production-grade local browser UI and proxy server for OmniDimension voice-agent APIs"
+description = "Workspace-based hosted console and local browser UI for OmniDimension voice-agent APIs"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "OmniDimension Community" }]
+dependencies = [
+    "Django==5.2.18", "asgiref==3.12.1", "sqlparse==0.6.0", "tzdata==2026.5",
+    "cryptography==50.0.2", "cffi==2.1.1", "pycparser==3.0",
+    "psycopg[binary]==3.3.6", "psycopg-binary==3.3.6", "typing_extensions==4.16.0",
+    "whitenoise==6.12.0", "packaging==26.3",
+]
+
+[tool.vercel]
+entrypoint = "omnidim_portal.wsgi:application"
+
+[tool.vercel.scripts]
+build = "python manage.py check --deploy --fail-level WARNING"
 
 [tool.ruff]
 line-length = 120

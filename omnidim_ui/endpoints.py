@@ -173,7 +173,7 @@ GROUPS: list[dict[str, Any]] = [
                 danger=True,
             ),
             ep("Bulk Calls", "GET", "/calls/bulk_call/{bulk_call_id}", "Bulk call details"),
-            ep("Bulk Calls", "PUT", "/calls/bulk_call/{bulk_call_id}", "Bulk call actions", {"action": "pause"}),
+            ep("Bulk Calls", "PUT", "/calls/bulk_call/{bulk_call_id}", "Bulk call actions", {"action": "pause"}, danger=True),
             ep("Bulk Calls", "DELETE", "/calls/bulk_call/{bulk_call_id}", "Cancel bulk call", danger=True),
             ep("Bulk Calls", "GET", "/calls/bulk_call/{bulk_call_id}/lines", "Bulk call results", query={"pagesize": 150, "include_total": True}),
             ep("Bulk Calls", "GET", "/calls/bulk_call/{bulk_call_id}/numbers", "List rotation pool"),
@@ -184,6 +184,7 @@ GROUPS: list[dict[str, Any]] = [
                 "/calls/bulk_call/{bulk_call_id}/numbers/{assignment_id}",
                 "Pause or resume pool number",
                 {"is_active": False},
+                danger=True,
             ),
             ep(
                 "Bulk Calls",
@@ -395,6 +396,17 @@ GROUPS: list[dict[str, Any]] = [
 ENDPOINTS: list[dict[str, Any]] = [endpoint for group in GROUPS for endpoint in group["endpoints"]]
 
 
+def is_dangerous_operation(endpoint: dict[str, Any], body: object = None) -> bool:
+    """Classify spend/destructive operations on the server, including body-driven campaign actions."""
+    if endpoint.get("danger") or endpoint.get("method") == "DELETE":
+        return True
+    if isinstance(body, dict) and endpoint.get("method") != "GET":
+        action = str(body.get("action", "")).strip().lower()
+        if action in {"resume", "start", "restart", "activate", "dispatch", "send", "delete"}:
+            return True
+    return False
+
+
 def template_to_regex(template: str) -> re.Pattern[str]:
     if template not in _TEMPLATE_REGEX_CACHE:
         pattern = "^" + re.sub(r"\{([^}]+)\}", r"(?P<\1>[^/?#]+)", template) + "$"
@@ -404,7 +416,7 @@ def template_to_regex(template: str) -> re.Pattern[str]:
 
 def match_endpoint(method: str, path: str) -> tuple[dict[str, Any] | None, dict[str, str]]:
     method = method.upper()
-    if ".." in path or "?" in path or "#" in path:
+    if any(c in path for c in ("..", "?", "#", "%", "\\", "//")) or any(ord(c) <= 32 or ord(c) == 127 for c in path):
         raise ValueError(f"Path contains illegal characters: {path}")
     for endpoint in ENDPOINTS:
         if endpoint["method"] != method:

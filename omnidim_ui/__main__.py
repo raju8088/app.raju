@@ -25,6 +25,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Enable detailed debug logging",
     )
     args = parser.parse_args(argv)
+    if args.host not in {"127.0.0.1", "localhost"}:
+        parser.error("The local server must bind to 127.0.0.1 or localhost. Use the hosted application for online access.")
+    if not 0 <= args.port <= 65535:
+        parser.error("Port must be between 0 and 65535")
 
     setup_logging(verbose=args.verbose)
 
@@ -34,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.db:
         config.DB_PATH = Path(args.db).resolve()
+        config.DATA_DIR = config.DB_PATH.parent
         logger.info("Using custom database path: %s", config.DB_PATH)
 
     init_db()

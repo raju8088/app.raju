@@ -14,9 +14,9 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+from omnidim_ui import config
 from omnidim_ui.config import (
     CONFIRMATION_TOKEN_TTL,
-    DB_PATH,
     REDACT_KEYS,
 )
 from omnidim_ui.logging_config import logger
@@ -105,7 +105,7 @@ def dpapi_unprotect(encrypted_str: str, crypt32: Any = None, kernel32: Any = Non
         kernel32 = ctypes.windll.kernel32
 
     try:
-        raw = base64.b64decode(encrypted_str[6:])
+        raw = base64.b64decode(encrypted_str[6:], validate=True)
     except Exception as exc:
         raise ValueError(f"Invalid DPAPI base64 payload: {exc}") from exc
     in_blob = _DATA_BLOB(
@@ -162,7 +162,7 @@ def redact_payload(obj: Any) -> Any:
         redacted = {}
         for k, v in obj.items():
             k_lower = str(k).lower().strip()
-            if any(target in k_lower for target in REDACT_KEYS):
+            if is_secret_key(k_lower):
                 redacted[k] = "[REDACTED]"
             elif k_lower == "file" and isinstance(v, str) and len(v) > 100:
                 redacted[k] = f"[BASE64_FILE: {len(v)} chars redacted]"
@@ -174,23 +174,29 @@ def redact_payload(obj: Any) -> Any:
     return obj
 
 
+def is_secret_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    return any(re.sub(r"[^a-z0-9]", "", target) in normalized for target in REDACT_KEYS) or normalized in {
+        "credential", "credentials", "privatekey", "clientsecret", "cookie", "setcookie",
+    }
+
+
 def sanitize_url(url_str: str) -> str:
     try:
         parsed = urllib.parse.urlparse(url_str)
-        if not parsed.query:
-            return url_str
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
         qs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
         sanitized_pairs = []
         for k, v in qs:
             k_lower = k.lower().strip()
-            if any(target in k_lower for target in REDACT_KEYS):
+            if is_secret_key(k_lower):
                 sanitized_pairs.append((k, "[REDACTED]"))
             else:
                 sanitized_pairs.append((k, v))
         new_query = urllib.parse.urlencode(sanitized_pairs)
-        return urllib.parse.urlunparse(parsed._replace(query=new_query))
+        return urllib.parse.urlunparse(parsed._replace(netloc=netloc, query=new_query, fragment=""))
     except Exception:
-        return url_str
+        return "[INVALID URL REDACTED]"
 
 
 def compute_danger_signature(method: str, path: str, query: dict[str, Any] | None, body: object) -> str:
@@ -254,16 +260,14 @@ def consume_confirm_token(
             return False, "Invalid, expired, or already-used confirmation token"
 
         entry = CONFIRMATION_TOKENS.pop(token)
-        ts = entry[0]
+        _ts = entry[0]
         ep_id = entry[1]
         stored_sig = entry[2]
         stored_sess = entry[3] if len(entry) > 3 else ""
 
-        if now - ts > CONFIRMATION_TOKEN_TTL:
-            return False, "Confirmation token has expired (60s lifetime exceeded)"
         if ep_id != endpoint_id:
             return False, "Confirmation token was issued for a different endpoint"
-        if stored_sess and session_id and not hmac.compare_digest(stored_sess, session_id):
+        if stored_sess and not hmac.compare_digest(stored_sess, session_id):
             return False, "Confirmation token was issued for a different local session"
         if not hmac.compare_digest(stored_sig, signature):
             return False, "Request parameters or body were modified after confirmation token was issued"
@@ -271,7 +275,7 @@ def consume_confirm_token(
 
 
 def secure_db_file(db_path: Path | None = None) -> None:
-    target = db_path or DB_PATH
+    target = db_path or config.DB_PATH
     if target.exists():
         try:
             os.chmod(target, 0o600)

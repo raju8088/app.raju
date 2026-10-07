@@ -18,17 +18,17 @@ from omnidim_ui.config import (
 )
 from omnidim_ui.db import (
     clear_history,
-    compact_json,
     get_db,
     get_history,
     log_history,
     now_iso,
     read_settings,
     save_setting,
+    saved_json,
 )
-from omnidim_ui.endpoints import ENDPOINTS, GROUPS, match_endpoint
+from omnidim_ui.endpoints import ENDPOINTS, GROUPS, is_dangerous_operation, match_endpoint
 from omnidim_ui.logging_config import logger
-from omnidim_ui.proxy import build_url, execute_proxy_request
+from omnidim_ui.proxy import build_url, execute_proxy_request, validate_upstream_url
 from omnidim_ui.security import (
     CSRF_TOKEN,
     LOCAL_AUTH_TOKEN,
@@ -40,17 +40,51 @@ from omnidim_ui.security import (
     is_valid_origin,
     issue_confirm_token,
     redact_payload,
+    sanitize_url,
     save_api_key,
 )
 
 
-def parse_json_bytes(raw: bytes) -> Any:
+def parse_json_bytes(raw: bytes) -> dict[str, Any]:
     if not raw:
         return {}
     try:
-        return json.loads(raw.decode("utf-8"))
-    except json.JSONDecodeError as exc:
+        value = json.loads(raw.decode("utf-8"), parse_constant=lambda constant: (_ for _ in ()).throw(ValueError("Non-finite numbers are forbidden")))
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         raise ValueError(f"Invalid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("JSON body must be an object")
+    return value
+
+
+def validate_request_payload(data: dict[str, Any]) -> tuple[str, str, dict[str, Any], Any, dict[str, Any]]:
+    """Validate a request envelope independently of HTTP/authentication."""
+    method_value = data.get("method", "GET")
+    if not isinstance(method_value, str) or method_value.upper() not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+        raise ValueError("Unsupported HTTP method")
+    method = method_value.upper()
+    path = data.get("path", "")
+    if not isinstance(path, str) or not path.startswith("/") or len(path) > 2048:
+        raise ValueError("Path must start with / and be at most 2048 characters")
+    query = data.get("query", {})
+    body = data.get("body")
+    if not isinstance(query, dict):
+        raise ValueError("Query must be a JSON object")
+    if body is not None and not isinstance(body, dict):
+        raise ValueError("Request body must be a JSON object or null")
+    for key, value in query.items():
+        if not isinstance(key, str) or not key or len(key) > 200:
+            raise ValueError("Invalid query parameter name")
+        values = value if isinstance(value, list) else [value]
+        if len(values) > 1000 or any(item is not None and not isinstance(item, (str, int, float, bool)) for item in values):
+            raise ValueError("Query values must be scalars or lists of scalars")
+    json.dumps(data, allow_nan=False)
+    if not isinstance(data.get("confirmToken", ""), str):
+        raise ValueError("Confirmation token must be a string")
+    matched_endpoint, _ = match_endpoint(method, path)
+    if not matched_endpoint:
+        raise PermissionError("Path and method are not in the registered API allowlist")
+    return method, path, query, body, matched_endpoint
 
 
 def is_read_only_active() -> bool:
@@ -85,7 +119,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.route()
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        logger.info("%s - %s", self.address_string(), fmt % args)
+        logger.info("%s - %s %s", self.address_string(), self.command, sanitize_url(self.path))
 
     def is_authenticated(self) -> bool:
         token_hdr = self.headers.get("X-Local-Token", "").strip()
@@ -117,6 +151,9 @@ class AppHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         try:
+            if not is_valid_host(self.headers.get("Host", "")):
+                self.send_json({"ok": False, "error": "Invalid or forbidden Host header", "requestId": req_id}, status=403)
+                return
             if path.startswith("/api/"):
                 # 1. Host header validation
                 host_header = self.headers.get("Host", "")
@@ -140,7 +177,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
 
                 # 3. Read-only mode enforcement
-                if is_read_only_active() and self.command != "GET":
+                if is_read_only_active() and self.command != "GET" and path not in {"/api/run", "/api/preflight"}:
                     self.send_json(
                         {
                             "ok": False,
@@ -152,11 +189,10 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
 
                 # 4. Mutating requests validation (POST, PUT, PATCH, DELETE)
-                if self.command in {"POST", "PUT", "PATCH"} or (
-                    self.command == "DELETE" and int(self.headers.get("Content-Length", 0) or 0) > 0
-                ):
+                if self.command in {"POST", "PUT", "PATCH", "DELETE"}:
+                    self.content_length()
                     content_type = self.headers.get("Content-Type", "")
-                    if not content_type.lower().startswith("application/json"):
+                    if (self.command != "DELETE" or self.headers.get("Content-Length", "0") != "0") and content_type.split(";", 1)[0].strip().lower() != "application/json":
                         self.send_json(
                             {"ok": False, "error": "Content-Type must be application/json", "requestId": req_id},
                             status=415,
@@ -164,7 +200,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         return
 
                     origin = self.headers.get("Origin", "")
-                    if not is_valid_origin(origin):
+                    if not is_valid_origin(origin) or (origin and urllib.parse.urlparse(origin).netloc.lower() != host_header.lower()):
                         self.send_json(
                             {"ok": False, "error": "Cross-origin request forbidden", "requestId": req_id},
                             status=403,
@@ -184,6 +220,8 @@ class AppHandler(BaseHTTPRequestHandler):
 
             self.serve_static(path)
 
+        except PermissionError as exc:
+            self.send_json({"ok": False, "error": str(exc), "requestId": req_id}, status=403)
         except ValueError as exc:
             logger.warning("[%s] Validation error on %s %s: %s", req_id, self.command, path, exc)
             self.send_json({"ok": False, "error": str(exc), "requestId": req_id}, status=400)
@@ -218,17 +256,22 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if self.command in {"POST", "PUT"}:
                 data = self.read_json()
+                if not isinstance(data.get("baseUrl", ""), str) or not isinstance(data.get("apiKey", ""), str):
+                    raise ValueError("Base URL and API key must be strings")
                 base_url = data.get("baseUrl", "").strip()
                 api_key = data.get("apiKey", "").strip()
                 retention_limit = data.get("retentionLimit")
                 if base_url:
-                    if not base_url.startswith("https://"):
-                        raise ValueError("Base URL must start with https://")
+                    validate_upstream_url(base_url)
+                    if urllib.parse.urlsplit(base_url).path.rstrip("/") != "/api/v1" or urllib.parse.urlsplit(base_url).query:
+                        raise ValueError("Base URL must be https://omnidim.io/api/v1")
                     save_setting("base_url", base_url.rstrip("/"))
                 if api_key:
                     save_api_key(api_key)
                 if retention_limit is not None:
                     try:
+                        if isinstance(retention_limit, bool) or not isinstance(retention_limit, (str, int)):
+                            raise ValueError("Retention limit must be an integer")
                         ret_int = int(retention_limit)
                         if ret_int < 10 or ret_int > 50000:
                             raise ValueError("Retention limit must be between 10 and 50,000")
@@ -294,6 +337,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 missing = [key for key in required if not data.get(key)]
                 if missing:
                     raise ValueError(f"Missing fields: {', '.join(missing)}")
+                if any(not isinstance(data[key], str) or len(data[key]) > 2048 for key in required):
+                    raise ValueError("Saved request metadata must contain bounded strings")
+                validate_request_payload(data)
                 ts = now_iso()
                 sanitized_query = redact_payload(data.get("query", {}))
                 sanitized_body = redact_payload(data.get("body", {}))
@@ -309,8 +355,8 @@ class AppHandler(BaseHTTPRequestHandler):
                             data["name"],
                             data["method"],
                             data["path"],
-                            compact_json(sanitized_query),
-                            compact_json(sanitized_body),
+                            saved_json(sanitized_query),
+                            saved_json(sanitized_body),
                             ts,
                             ts,
                         ),
@@ -325,45 +371,31 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             return
 
-        if path == "/api/run" and self.command == "POST":
-            self.run_omni_request(req_id)
+        if path in {"/api/run", "/api/preflight"} and self.command == "POST":
+            self.run_omni_request(req_id, preflight=path == "/api/preflight")
             return
 
         self.send_json({"ok": False, "error": f"Unknown API endpoint: {path}", "requestId": req_id}, status=404)
 
-    def run_omni_request(self, req_id: str) -> None:
+    def run_omni_request(self, req_id: str, preflight: bool = False) -> None:
         data = self.read_json()
-        method = data.get("method", "GET").upper()
-        path = data.get("path", "")
-        query = data.get("query") or {}
-        body = data.get("body", None)
-
-        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
-            raise ValueError("Unsupported HTTP method")
-        if not isinstance(path, str) or not path.startswith("/"):
-            raise ValueError("Path must start with /")
-        if "://" in path:
-            raise ValueError("Path must be relative to the OmniDimension API base URL")
-        if not isinstance(query, dict):
-            raise ValueError("Query must be a JSON object")
-
-        # 1. Match against registered endpoint allowlist
-        matched_endpoint, _ = match_endpoint(method, path)
-        if not matched_endpoint:
-            self.send_json(
-                {
-                    "ok": False,
-                    "error": f"Path '{path}' with method '{method}' is not in the registered API allowlist.",
-                    "requestId": req_id,
-                },
-                status=403,
-            )
+        method, path, query, body, matched_endpoint = validate_request_payload(data)
+        if is_read_only_active() and method != "GET":
+            self.send_json({"ok": False, "error": "Server is running in read-only mode. Mutating actions are blocked.", "requestId": req_id}, status=403)
+            return
+        endpoint_id_value = matched_endpoint["id"]
+        dangerous = is_dangerous_operation(matched_endpoint, body)
+        if preflight:
+            result = {"ok": True, "danger": dangerous, "endpoint": matched_endpoint, "requestId": req_id}
+            if dangerous:
+                sig = compute_danger_signature(method, path, query, body)
+                result.update({"confirmToken": issue_confirm_token(endpoint_id_value, sig, session_id=self.get_auth_session()),
+                               "requiredConfirm": matched_endpoint.get("summary", "Confirm action"), "expiresInSeconds": 60})
+            self.send_json(result)
             return
 
-        endpoint_id_value = matched_endpoint["id"]
-
         # 2. Danger confirmation enforcement via single-use 60s bound token
-        if matched_endpoint.get("danger"):
+        if dangerous:
             sig = compute_danger_signature(method, path, query, body)
             confirm_token = str(data.get("confirmToken") or "").strip()
             session_id = self.get_auth_session()
@@ -431,39 +463,52 @@ class AppHandler(BaseHTTPRequestHandler):
         )
 
         duration_ms = int((time.perf_counter() - started) * 1000)
-        log_history(
-            endpoint_id_value=endpoint_id_value,
-            method=method,
-            path=path,
-            url=url,
-            status=status or 0,
-            ok=ok,
-            duration_ms=duration_ms,
-            request_payload=request_payload,
-            response_payload=response_payload,
-        )
+        history_saved = True
+        try:
+            log_history(
+                endpoint_id_value=endpoint_id_value, method=method, path=path, url=url,
+                status=status or 0, ok=ok, duration_ms=duration_ms,
+                request_payload=request_payload, response_payload=response_payload,
+            )
+        except Exception:
+            history_saved = False
+            logger.error("[%s] Request completed but local history storage failed", req_id)
 
         self.send_json(
             {
                 "ok": ok,
                 "status": status,
                 "durationMs": duration_ms,
-                "url": url,
+                "url": sanitize_url(url),
                 "data": response_payload,
+                "historySaved": history_saved,
+                "requestId": req_id,
             },
-            status=200 if status is None or status < 500 else 502,
+            status=200 if ok else (status if status and 400 <= status < 500 else 502),
         )
 
-    def read_json(self) -> Any:
+    def content_length(self) -> int:
+        if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) > 1:
+            raise ValueError("Ambiguous request framing is not supported")
         length_str = self.headers.get("Content-Length", "0")
         try:
             length = int(length_str)
         except ValueError as exc:
             raise ValueError("Invalid Content-Length header") from exc
 
+        if length < 0:
+            raise ValueError("Content-Length must not be negative")
         if length > MAX_REQUEST_BODY_BYTES:
             raise ValueError(f"Request body exceeds maximum allowed size ({MAX_REQUEST_BODY_BYTES} bytes)")
-        return parse_json_bytes(self.rfile.read(length))
+        return length
+
+    def read_json(self) -> dict[str, Any]:
+        length = self.content_length()
+        self.connection.settimeout(15)
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("Incomplete request body")
+        return parse_json_bytes(raw)
 
     def send_json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")

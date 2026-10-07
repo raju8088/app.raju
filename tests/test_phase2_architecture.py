@@ -10,7 +10,7 @@ from omnidim_ui import db, proxy
 from omnidim_ui.drift_check import check_catalog_drift
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def live_server():
     omnidim_ui.init_db()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), omnidim_ui.AppHandler)
@@ -152,7 +152,7 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
         pass  # Suppress mock logs during tests
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def mock_upstream():
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), MockUpstreamHandler)
     host, port = httpd.server_address
@@ -170,6 +170,7 @@ def test_proxy_idempotent_get_retries_and_recovers(mock_upstream):
     status, ok, data = proxy.execute_proxy_request(
         method="GET",
         url=url,
+        url_validator=lambda target: target,
         api_key="test-key",
         timeout=5,
         max_retries=3,
@@ -190,6 +191,7 @@ def test_proxy_mutating_post_never_retries(mock_upstream):
     status, ok, data = proxy.execute_proxy_request(
         method="POST",
         url=url,
+        url_validator=lambda target: target,
         api_key="test-key",
         body={"name": "test"},
         timeout=5,

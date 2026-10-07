@@ -12,13 +12,14 @@
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
+    <a class="skip-link" href="#endpointView">Skip to workspace</a>
     <div class="app-shell">
       <aside class="sidebar" aria-label="Endpoint sequence">
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">OD</div>
           <div>
             <strong>Omni Control</strong>
-            <span>API workspace</span>
+            <span>Voice operations workspace</span>
           </div>
         </div>
 
@@ -26,28 +27,44 @@
           <span id="connectionDot" class="status-dot"></span>
           <div>
             <strong id="connectionLabel">Checking setup</strong>
-            <span id="connectionDetail">Local database ready</span>
+            <span id="connectionDetail">Loading workspace settings</span>
           </div>
         </div>
 
-        <nav id="groupNav" class="group-nav"></nav>
+        <p class="nav-caption">Explore &amp; manage</p>
+        <nav id="groupNav" class="group-nav" aria-label="Action categories"></nav>
 
         <div class="sidebar-actions">
           <button class="sidebar-button" type="button" data-view="history">Request history</button>
-          <button class="sidebar-button" type="button" data-view="database">Saved payloads</button>
+          <button class="sidebar-button" type="button" data-view="database">Saved requests</button>
         </div>
       </aside>
 
       <main class="workspace">
+        <div id="accountBar" class="account-bar" hidden>
+          <label class="workspace-switcher" for="workspaceSelect"><span>Workspace</span><select id="workspaceSelect" aria-label="Active workspace"></select></label>
+          <div class="account-details"><span id="accountName"></span><span id="accountRole" class="account-role"></span><button id="logoutBtn" class="button subtle" type="button">Sign out</button></div>
+        </div>
         <header class="topbar">
           <div>
             <div class="title-with-badge">
-              <p class="eyebrow">API control center</p>
+              <p class="eyebrow">OmniDimension / Control center</p>
               <span id="readOnlyBadge" class="read-only-badge" hidden>READ-ONLY MODE</span>
             </div>
-            <h1>OmniDimension</h1>
+            <h1>Your voice workspace</h1>
+            <p class="workspace-subtitle">Manage agents, calls and campaigns in one place.</p>
           </div>
-
+          <div class="topbar-actions">
+            <button id="themeToggleBtn" class="button" type="button" aria-pressed="false">Dark appearance</button>
+            <button id="openSettingsBtn" class="button primary" type="button">Connection settings</button>
+          </div>
+        </header>
+        <div id="workspaceNotice" class="workspace-notice" role="status" hidden>
+          <div><strong id="noticeTitle"></strong><p id="noticeMessage"></p></div>
+          <button id="retryLoadBtn" class="button" type="button" hidden>Try again</button>
+        </div>
+        <details id="settingsPanel" class="settings-panel">
+          <summary>Connection settings <span>Credentials &amp; history preferences</span></summary>
           <div class="settings-strip" aria-label="API settings">
             <label>
               <span>Base URL</span>
@@ -61,22 +78,24 @@
               <span>History limit</span>
               <input id="retentionLimitInput" type="number" min="10" max="50000" placeholder="5000" autocomplete="off">
             </label>
-            <button id="saveSettingsBtn" class="button primary" type="button">Save</button>
+            <button id="saveSettingsBtn" class="button primary" type="button">Save settings</button>
             <button id="clearKeyBtn" class="button subtle" type="button">Clear key</button>
           </div>
-        </header>
+          <p id="settingsAccessNote" class="settings-help" hidden></p>
+          <p class="settings-help">Your API key is stored by the server. Saving a key does not verify the connection; the next request will show its result.</p>
+        </details>
 
         <section class="summary-band" aria-label="Workspace summary">
           <div class="stat">
-            <span>Total endpoints</span>
+            <span>Available actions</span>
             <strong id="totalEndpointCount">0</strong>
           </div>
           <div class="stat">
-            <span>Current group</span>
+            <span>Current category</span>
             <strong id="currentGroupStat">Sessions</strong>
           </div>
           <div class="stat">
-            <span>Saved payloads</span>
+            <span>Saved requests</span>
             <strong id="savedPayloadCount">0</strong>
           </div>
           <div class="stat">
@@ -86,25 +105,26 @@
         </section>
 
         <section id="endpointView" class="content-layout">
-          <section class="endpoint-browser" aria-label="Endpoints">
+          <section class="endpoint-browser" aria-label="Available actions">
             <div class="section-head">
               <div>
-                <p class="eyebrow">Sequence</p>
+                <p class="eyebrow">Action library</p>
                 <h2 id="groupTitle">Sessions</h2>
                 <p id="groupDescription">Create temporary browser voice sessions.</p>
               </div>
               <label class="search-box">
-                <span>Search</span>
-                <input id="searchInput" type="search" placeholder="Endpoint, method, path">
+                <span>Search all actions</span>
+                <input id="searchInput" type="search" placeholder="Search actions or paths…">
               </label>
             </div>
-            <div id="endpointList" class="endpoint-list"></div>
+            <div class="filter-bar"><label for="actionFilter">Show</label><select id="actionFilter"><option value="all">All actions</option><option value="read">Read actions</option><option value="write">Write actions</option><option value="protected">Protected actions</option></select><span id="actionCount" class="meta-line"></span></div>
+            <div id="endpointList" class="endpoint-list" aria-busy="true"></div>
           </section>
 
           <section class="runner" aria-label="Request runner">
             <div id="endpointDetail" class="empty-state">
-              <h2>Select an endpoint</h2>
-              <p>Choose the next action from the sequence to build and send a request.</p>
+              <h2>Getting your workspace ready</h2>
+              <p>Loading your action library and connection settings…</p>
             </div>
           </section>
         </section>
@@ -112,15 +132,17 @@
         <section id="historyView" class="table-view" hidden>
           <div class="section-head">
             <div>
-              <p class="eyebrow">Database</p>
+              <p class="eyebrow">Activity</p>
               <h2>Request history</h2>
-              <p>Every request sent through the private proxy is recorded locally.</p>
+              <p>Review request outcomes, response times and recent activity.</p>
             </div>
-            <div class="inline-actions" style="display: flex; gap: 0.5rem; align-items: center;">
-              <input id="historySearchInput" type="search" placeholder="Filter history..." style="padding: 0.4rem 0.6rem; border-radius: 4px; border: 1px solid var(--border-color, #ccc); background: transparent; color: inherit; font-size: 0.85rem;">
+            <div class="inline-actions">
+              <label class="search-box"><span>Search history</span><input id="historySearchInput" type="search" placeholder="Filter by action or path…"></label>
+              <button id="refreshHistoryBtn" class="button" type="button">Refresh</button>
               <button id="clearHistoryBtn" class="button danger" type="button">Clear history</button>
             </div>
           </div>
+          <p id="historyStatus" class="panel-status" role="status" hidden></p>
           <div class="table-wrap">
             <table class="data-table">
               <thead>
@@ -135,7 +157,7 @@
               <tbody id="historyRows"></tbody>
             </table>
           </div>
-          <div class="pagination-bar" id="historyPagination" style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0.5rem; font-size: 0.85rem;">
+          <div class="pagination-bar" id="historyPagination">
             <button id="historyPrevBtn" class="button" type="button" disabled>Previous</button>
             <span id="historyPageInfo">Page 1 of 1</span>
             <button id="historyNextBtn" class="button" type="button" disabled>Next</button>
@@ -145,17 +167,18 @@
         <section id="databaseView" class="table-view" hidden>
           <div class="section-head">
             <div>
-              <p class="eyebrow">Database</p>
-              <h2>Saved payloads</h2>
-              <p>Reusable request bodies and query values saved in SQLite.</p>
+              <p class="eyebrow">Your library</p>
+              <h2>Saved requests</h2>
+              <p>Pick up a reusable request. Credentials and attachments may need to be added again.</p>
             </div>
           </div>
+          <p id="savedStatus" class="panel-status" role="status" hidden></p>
           <div id="savedPayloadList" class="saved-list"></div>
         </section>
       </main>
     </div>
 
-    <dialog id="dangerDialog" class="danger-dialog">
+    <dialog id="dangerDialog" class="danger-dialog" aria-labelledby="modalActionTitle" aria-describedby="modalImpactText">
       <form method="dialog" class="dialog-content">
         <div class="dialog-header">
           <span class="danger-badge">⚠️ Protected Action Required</span>
@@ -173,12 +196,12 @@
           </div>
           <label class="confirm-prompt">
             <span id="modalPromptText">Type exact summary to confirm:</span>
-            <input id="modalConfirmInput" type="text" autocomplete="off" placeholder="Type confirmation phrase here">
+            <input id="modalConfirmInput" type="text" autocomplete="off" placeholder="Type confirmation phrase here" autofocus>
           </label>
         </div>
         <div class="dialog-actions">
           <button id="modalCancelBtn" class="button" type="button">Cancel</button>
-          <button id="modalConfirmBtn" class="button danger" type="button" disabled>Confirm &amp; Execute</button>
+          <button id="modalConfirmBtn" class="button danger" type="button" disabled>Confirm and send</button>
         </div>
       </form>
     </dialog>

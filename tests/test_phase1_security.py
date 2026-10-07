@@ -10,7 +10,7 @@ import pytest
 import omnidim_ui
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def live_server():
     omnidim_ui.init_db()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), omnidim_ui.AppHandler)

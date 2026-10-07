@@ -1,0 +1,49 @@
+name: Hosted application
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  hosted:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: omni_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: isolated-test-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:isolated-test-password@localhost:5432/omni_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-hosted.txt -r requirements-dev.txt
+      - run: python -m coverage run --source=omnidim_portal,portal_core manage.py test portal_core omnidim_portal --settings=omnidim_portal.test_settings
+      - run: python -m coverage report --fail-under=85 --omit="*/migrations/*,*/test*,*/wsgi.py,*/__init__.py"
+      - run: python manage.py makemigrations --check --dry-run --settings=omnidim_portal.test_settings
+      - run: python tests/check_production.py
+      - run: pip-audit -r requirements-hosted.txt
+      - run: docker build -t omnidim-test .
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-hosted.txt
+      - run: npm install --no-save playwright@1.62.1
+      - run: npx playwright install chrome
+      - run: node tests/ui_smoke.cjs
+      - run: node tests/hosted_browser.cjs
+        env:
+          HOSTED_PYTHON: python

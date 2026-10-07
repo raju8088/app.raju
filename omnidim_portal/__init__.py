@@ -1,0 +1,1 @@
+"""Hosted OmniDimension workspace application."""

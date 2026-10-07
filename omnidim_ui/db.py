@@ -4,11 +4,10 @@ import math
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from omnidim_ui import config
 from omnidim_ui.config import (
-    DB_PATH,
     DEFAULT_BASE_URL,
     HISTORY_RETENTION_LIMIT,
     MAX_LOG_CHARS,
@@ -33,10 +32,29 @@ def compact_json(value: Any) -> str:
     return text
 
 
+def saved_json(value: Any) -> str:
+    """Store a complete valid document; log truncation must never corrupt saved requests."""
+    text = json.dumps(value, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+    if len(text.encode("utf-8")) > config.MAX_REQUEST_BODY_BYTES:
+        raise ValueError("Saved payload exceeds maximum allowed size")
+    return text
+
+
+class ManagedConnection(sqlite3.Connection):
+    """SQLite connection subclass that automatically closes itself upon exiting a context."""
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Literal[False]:
+        try:
+            super().__exit__(exc_type, exc_val, exc_tb)
+            return False
+        finally:
+            self.close()
+
+
 def get_db(db_path: Path | str | None = None) -> sqlite3.Connection:
-    target = Path(db_path) if db_path else DB_PATH
+    target = Path(db_path) if db_path else config.DB_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(target)
+    conn = sqlite3.connect(target, factory=ManagedConnection)
     conn.row_factory = sqlite3.Row
     # Production SQLite Pragmas
     conn.execute("PRAGMA journal_mode = WAL;")

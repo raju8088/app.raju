@@ -1,0 +1,18 @@
+# Vercel deployment
+
+The project explicitly points Vercel at `omnidim_portal.wsgi:application`, not the legacy local server. The configuration follows [Vercel's Django guide](https://vercel.com/docs/frameworks/full-stack/django). Vercel detects Django, collects static files and runs the application as one Python function. Use a current CLI (minimum 50.38.0 per the guide) or import through the dashboard.
+
+1. Import the repository and set **Root Directory** to `create-an-image-of-2/outputs/omnidim-control-center` if importing this full workspace repository. If the app folder is its own repository, use its root. Select Django if detection requires a framework choice.
+2. Add managed PostgreSQL through Vercel's marketplace or use an existing provider. Use a pooled TLS connection URL compatible with PostgreSQL transactions and row locks. The app closes connections per request on Vercel and disables prepared statements for transaction-pool compatibility. Choose a deployment region near the database. Configure database connection limits with the provider.
+3. Add environment variables separately for Preview and Production: `DJANGO_SECRET_KEY`, `OMNIDIM_ENCRYPTION_KEY`, `DATABASE_URL`, `DATABASE_SSLMODE=require`, `ALLOWED_HOSTS` with the exact intended hostname, and `CSRF_TRUSTED_ORIGINS=https://YOUR_HOSTNAME`. Do not add wildcards or point preview deployments at the production database. Set `OMNIDIM_ENV=production`. Keep `TRUST_PROXY` unset until staging verifies the platform's handling of forwarded HTTPS headers; if HTTPS redirects loop, use `TRUST_PROXY=1` only after confirming Vercel supplies and overwrites `X-Forwarded-Proto`. Check login rate limiting with the actual client IP.
+4. Before the first deployment, run `manage.py migrate`, `createsuperuser`, and `create_workspace` once from a secure machine against the target database, with the same secrets in that process environment. Do not expose setup routes or embed passwords in command history. Migrations are deliberately separate from the build so parallel preview builds cannot modify production schema.
+5. Deploy a Preview first, using its exact stable preview alias in `ALLOWED_HOSTS` and CSRF origins. `vercel.json` requests a 120-second function duration; verify your plan supports it. Review deployment logs, readiness, static assets, sign-in, workspace roles and duplicate-request behavior before promoting to Production.
+6. Configure a domain or use a stable project `vercel.app` hostname. Re-run the acceptance checklist in `DEPLOYMENT.md` on that HTTPS hostname. Vercel provides the hosting layer; database backups, secret recovery and application access remain your responsibility.
+
+The project uses durable database sessions, confirmations, budgets and idempotency records so separate function instances share state. It never uses the Vercel filesystem as a production database or credential store. Requests over 10 MB are rejected by the application; platform limits may be lower. Large uploads need a separate signed storage workflow if required.
+
+Run `portal_maintenance` daily from a trusted scheduled runner with database access. There is no public maintenance endpoint. Configure external uptime/error alerts and managed PostgreSQL backups with restore drills. Use staging to validate actual concurrent requests and function timeouts. On a timeout, mutations remain pending/unknown and are never automatically repeated.
+
+## Not yet verified
+
+No Vercel account/project, hosted database or final domain is connected in this workspace. The files prepare the deployment; they do not establish a deployed URL. Deployment, PostgreSQL concurrency, live HTTPS, backup restoration and load tests are required before claiming 95/100 production readiness.

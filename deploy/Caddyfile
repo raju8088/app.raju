@@ -1,0 +1,12 @@
+{$APP_DOMAIN} {
+    request_body {
+        max_size 10MB
+    }
+    reverse_proxy app:8000 {
+        header_up X-Forwarded-Proto https
+        header_up X-Real-IP {remote_host}
+        transport http {
+            response_header_timeout 125s
+        }
+    }
+}

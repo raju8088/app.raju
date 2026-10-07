@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "omnidim_portal/wsgi.py": {
+      "maxDuration": 120,
+      "excludeFiles": "{.venv*/**,data/**,tests/**,.git/**,.pytest*/**,.ruff*/**,.mypy*/**,htmlcov/**,**/*.sqlite3*,**/*.log}"
+    }
+  }
+}
